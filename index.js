@@ -40,7 +40,7 @@ const SYSTEM_MESSAGE = `You are a professional and friendly dental receptionist 
 
 Always confirm important details like appointment times and phone numbers by repeating them back to the caller.`;
 
-const VOICE = 'shimmer'; // shimmer has a warm, professional female voice ideal for receptionists
+const VOICE = 'maple'; // Using maple voice for a natural, warm tone
 const TEMPERATURE = 0.6; // Lower temperature for more consistent, professional responses
 const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
 
@@ -70,9 +70,6 @@ fastify.get('/', async (request, reply) => {
 fastify.all('/incoming-call', async (request, reply) => {
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
-                              <Say voice="Google.en-US-Chirp3-HD-Aoede">Thank you for calling! Please hold while I connect you with our virtual dental receptionist.</Say>
-                              <Pause length="1"/>
-                              <Say voice="Google.en-US-Chirp3-HD-Aoede">Go ahead, I'm listening. How may I help you today?</Say>
                               <Connect>
                                   <Stream url="wss://${request.headers.host}/media-stream" />
                               </Connect>
@@ -118,8 +115,8 @@ fastify.register(async (fastify) => {
             console.log('Sending session update:', JSON.stringify(sessionUpdate));
             openAiWs.send(JSON.stringify(sessionUpdate));
 
-            // Uncomment the following line to have AI speak first:
-            // sendInitialConversationItem();
+            // Have AI speak first with the greeting
+            sendInitialConversationItem();
         };
 
         // Send initial conversation item if AI talks first

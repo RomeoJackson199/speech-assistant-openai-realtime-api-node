@@ -6,7 +6,13 @@ import fastifyWs from '@fastify/websocket';
 
 dotenv.config();
 
-const { OPENAI_API_KEY, SUPABASE_URL, SUPABASE_ANON_KEY, BUSINESS_ID } = process.env;
+const {
+    OPENAI_API_KEY,
+    OPENAI_REALTIME_MODEL,
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY,
+    BUSINESS_ID
+} = process.env;
 
 if (!OPENAI_API_KEY) {
     console.error('Missing OpenAI API key. Please set it in the .env file.');
@@ -20,6 +26,13 @@ fastify.register(fastifyWs);
 const VOICE = 'alloy';
 const TEMPERATURE = 0.6;
 const PORT = process.env.PORT || 5050;
+const REALTIME_MODEL = OPENAI_REALTIME_MODEL || 'gpt-4o-mini-realtime-preview';
+
+const buildAudioResponseConfig = () => ({
+    modalities: ['text', 'audio'],
+    voice: VOICE,
+    output_audio_format: 'g711_ulaw'
+});
 
 // Tool definitions - names match what the edge function's conversational flow uses
 const TOOLS = [
@@ -265,8 +278,10 @@ fastify.register(async (fastify) => {
         let lastAssistantItem = null;
         let markQueue = [];
         let responseStartTimestampTwilio = null;
+        let twilioStreamStarted = false;
+        let greetingSent = false;
 
-        const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview', {
+        const openAiWs = new WebSocket(`wss://api.openai.com/v1/realtime?model=${encodeURIComponent(REALTIME_MODEL)}`, {
             headers: {
                 Authorization: `Bearer ${OPENAI_API_KEY}`,
                 'OpenAI-Beta': 'realtime=v1'
@@ -299,10 +314,13 @@ fastify.register(async (fastify) => {
             openAiWs.send(JSON.stringify(sessionUpdate));
            
 
-            // Wait 500ms total from OpenAI open - Twilio 'start' event (which sets callerPhone)
-            // reliably arrives within ~200ms of the media stream WebSocket connecting,
-            // so callerPhone will be available by the time this fires.
-            setTimeout(sendInitialGreeting, 400);
+            maybeSendInitialGreeting();
+        };
+
+        const maybeSendInitialGreeting = () => {
+            if (!twilioStreamStarted || greetingSent) return;
+            greetingSent = true;
+            setTimeout(sendInitialGreeting, 100);
         };
 
         // Send greeting AFTER callerPhone is available (called from initializeSession)
@@ -345,7 +363,10 @@ fastify.register(async (fastify) => {
                 };
 
                 openAiWs.send(JSON.stringify(greetingItem));
-                openAiWs.send(JSON.stringify({ type: 'response.create' }));
+                openAiWs.send(JSON.stringify({
+                    type: 'response.create',
+                    response: buildAudioResponseConfig()
+                }));
                 console.log('Initial greeting sent');
             } catch (e) {
                 console.error('sendInitialGreeting failed:', e);
@@ -360,7 +381,10 @@ fastify.register(async (fastify) => {
                                 content: [{ type: 'input_text', text: '[System: Greet the caller warmly and offer to help with appointments.]' }]
                             }
                         }));
-                        openAiWs.send(JSON.stringify({ type: 'response.create' }));
+                        openAiWs.send(JSON.stringify({
+                            type: 'response.create',
+                            response: buildAudioResponseConfig()
+                        }));
                     }
                 } catch (e2) {
                     console.error('Fallback greeting also failed:', e2);
@@ -382,7 +406,10 @@ fastify.register(async (fastify) => {
             };
 
             openAiWs.send(JSON.stringify(functionResult));
-            openAiWs.send(JSON.stringify({ type: 'response.create' }));
+            openAiWs.send(JSON.stringify({
+                type: 'response.create',
+                response: buildAudioResponseConfig()
+            }));
         };
 
         const handleSpeechStartedEvent = () => {
@@ -419,7 +446,7 @@ fastify.register(async (fastify) => {
         };
 
         openAiWs.on('open', () => {
-            console.log('Connected to OpenAI Realtime API');
+            console.log(`Connected to OpenAI Realtime API using model: ${REALTIME_MODEL}`);
             setTimeout(initializeSession, 100);
         });
 
@@ -487,8 +514,10 @@ fastify.register(async (fastify) => {
                             callerPhone = data.start.customParameters.callerPhone;
                         }
                         console.log('Stream started:', streamSid, 'Caller:', callerPhone);
+                        twilioStreamStarted = true;
                         responseStartTimestampTwilio = null;
                         latestMediaTimestamp = 0;
+                        maybeSendInitialGreeting();
                         break;
 
                     case 'mark':

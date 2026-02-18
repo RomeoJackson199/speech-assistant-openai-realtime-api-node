@@ -6,7 +6,13 @@ import fastifyWs from '@fastify/websocket';
 
 dotenv.config();
 
-const { OPENAI_API_KEY, SUPABASE_URL, SUPABASE_ANON_KEY, BUSINESS_ID } = process.env;
+const {
+    OPENAI_API_KEY,
+    OPENAI_REALTIME_MODEL,
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY,
+    BUSINESS_ID
+} = process.env;
 
 if (!OPENAI_API_KEY) {
     console.error('Missing OpenAI API key. Please set it in the .env file.');
@@ -20,6 +26,7 @@ fastify.register(fastifyWs);
 const VOICE = 'alloy';
 const TEMPERATURE = 0.6;
 const PORT = process.env.PORT || 5050;
+const REALTIME_MODEL = OPENAI_REALTIME_MODEL || 'gpt-realtime';
 
 // Tool definitions - names match what the edge function's conversational flow uses
 const TOOLS = [
@@ -266,7 +273,7 @@ fastify.register(async (fastify) => {
         let markQueue = [];
         let responseStartTimestampTwilio = null;
 
-        const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview', {
+        const openAiWs = new WebSocket(`wss://api.openai.com/v1/realtime?model=${encodeURIComponent(REALTIME_MODEL)}`, {
             headers: {
                 Authorization: `Bearer ${OPENAI_API_KEY}`,
                 'OpenAI-Beta': 'realtime=v1'
@@ -345,7 +352,12 @@ fastify.register(async (fastify) => {
                 };
 
                 openAiWs.send(JSON.stringify(greetingItem));
-                openAiWs.send(JSON.stringify({ type: 'response.create' }));
+                openAiWs.send(JSON.stringify({
+                    type: 'response.create',
+                    response: {
+                        modalities: ['text', 'audio']
+                    }
+                }));
                 console.log('Initial greeting sent');
             } catch (e) {
                 console.error('sendInitialGreeting failed:', e);
@@ -360,7 +372,12 @@ fastify.register(async (fastify) => {
                                 content: [{ type: 'input_text', text: '[System: Greet the caller warmly and offer to help with appointments.]' }]
                             }
                         }));
-                        openAiWs.send(JSON.stringify({ type: 'response.create' }));
+                        openAiWs.send(JSON.stringify({
+                            type: 'response.create',
+                            response: {
+                                modalities: ['text', 'audio']
+                            }
+                        }));
                     }
                 } catch (e2) {
                     console.error('Fallback greeting also failed:', e2);
@@ -382,7 +399,12 @@ fastify.register(async (fastify) => {
             };
 
             openAiWs.send(JSON.stringify(functionResult));
-            openAiWs.send(JSON.stringify({ type: 'response.create' }));
+            openAiWs.send(JSON.stringify({
+                type: 'response.create',
+                response: {
+                    modalities: ['text', 'audio']
+                }
+            }));
         };
 
         const handleSpeechStartedEvent = () => {
@@ -419,7 +441,7 @@ fastify.register(async (fastify) => {
         };
 
         openAiWs.on('open', () => {
-            console.log('Connected to OpenAI Realtime API');
+            console.log(`Connected to OpenAI Realtime API using model: ${REALTIME_MODEL}`);
             setTimeout(initializeSession, 100);
         });
 

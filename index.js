@@ -265,7 +265,6 @@ fastify.register(async (fastify) => {
         let lastAssistantItem = null;
         let markQueue = [];
         let responseStartTimestampTwilio = null;
-        let sessionInitialized = false;
 
         const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {
             headers: {
@@ -274,7 +273,7 @@ fastify.register(async (fastify) => {
             }
         });
 
-        // Initialize OpenAI session with tools
+        // Initialize OpenAI session with tools, then trigger greeting
         const initializeSession = () => {
             const sessionUpdate = {
                 type: 'session.update',
@@ -299,6 +298,11 @@ fastify.register(async (fastify) => {
             console.log('Sending session update');
             openAiWs.send(JSON.stringify(sessionUpdate));
             sessionInitialized = true;
+
+            // Wait 500ms total from OpenAI open - Twilio 'start' event (which sets callerPhone)
+            // reliably arrives within ~200ms of the media stream WebSocket connecting,
+            // so callerPhone will be available by the time this fires.
+            setTimeout(sendInitialGreeting, 400);
         };
 
         // Send greeting AFTER callerPhone is available (called from 'start' event)
@@ -452,27 +456,12 @@ fastify.register(async (fastify) => {
 
                     case 'start':
                         streamSid = data.start.streamSid;
-                        // Extract callerPhone here - guaranteed to be set before greeting
                         if (data.start.customParameters?.callerPhone) {
                             callerPhone = data.start.customParameters.callerPhone;
                         }
                         console.log('Stream started:', streamSid, 'Caller:', callerPhone);
                         responseStartTimestampTwilio = null;
                         latestMediaTimestamp = 0;
-
-                        // Trigger greeting only after callerPhone is set
-                        // Wait for session to be initialized first
-                        if (sessionInitialized) {
-                            sendInitialGreeting();
-                        } else {
-                            // Poll until session is ready (should be very fast)
-                            const waitForSession = setInterval(() => {
-                                if (sessionInitialized) {
-                                    clearInterval(waitForSession);
-                                    sendInitialGreeting();
-                                }
-                            }, 50);
-                        }
                         break;
 
                     case 'mark':

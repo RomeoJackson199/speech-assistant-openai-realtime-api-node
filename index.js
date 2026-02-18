@@ -297,7 +297,6 @@ fastify.register(async (fastify) => {
             };
             console.log('Sending session update');
             openAiWs.send(JSON.stringify(sessionUpdate));
-            sessionInitialized = true;
 
             // Wait 500ms total from OpenAI open - Twilio 'start' event (which sets callerPhone)
             // reliably arrives within ~200ms of the media stream WebSocket connecting,

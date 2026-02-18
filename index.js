@@ -308,6 +308,10 @@ fastify.register(async (fastify) => {
                     console.error('OpenAI WS not open when greeting attempted, state:', openAiWs.readyState);
                     return;
                 }
+                const callerInfo = callerPhone
+                    ? `The caller's phone number is ${callerPhone}. Call the lookup_patient tool immediately to identify them, then greet them by name if found.`
+                    : `Greet the caller warmly, introduce yourself as Eric the AI dental receptionist, and ask how you can help.`;
+
                 const greetingItem = {
                     type: 'conversation.item.create',
                     item: {
@@ -315,7 +319,7 @@ fastify.register(async (fastify) => {
                         role: 'user',
                         content: [{
                             type: 'input_text',
-                            text: `[System: A patient is calling. Greet them warmly, introduce yourself as the AI receptionist, and ask how you can help them today.]`
+                            text: `[System: ${callerInfo}]`
                         }]
                     }
                 };

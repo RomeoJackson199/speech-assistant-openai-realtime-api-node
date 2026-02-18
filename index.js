@@ -297,41 +297,17 @@ fastify.register(async (fastify) => {
             };
             console.log('Sending session update');
             openAiWs.send(JSON.stringify(sessionUpdate));
-            sessionInitialized = true;
-
-            // Wait 500ms total from OpenAI open - Twilio 'start' event (which sets callerPhone)
-            // reliably arrives within ~200ms of the media stream WebSocket connecting,
-            // so callerPhone will be available by the time this fires.
+            // Wait 400ms for Twilio 'start' event to arrive and set callerPhone
             setTimeout(sendInitialGreeting, 400);
         };
 
-        // Send greeting AFTER callerPhone is available (called from initializeSession)
-        const sendInitialGreeting = async () => {
+        // Send greeting immediately - no async lookups, just get audio flowing ASAP
+        const sendInitialGreeting = () => {
             try {
-                let greetingContext = '';
-
-                if (callerPhone && SUPABASE_URL && SUPABASE_ANON_KEY) {
-                    try {
-                        const lookupResult = await executeToolCall('lookup_patient', { phone: callerPhone }, callerPhone);
-                        if (lookupResult.found && lookupResult.profile) {
-                            greetingContext = `The caller has been identified as ${lookupResult.profile.first_name} ${lookupResult.profile.last_name}. Greet them by name.`;
-                        } else {
-                            greetingContext = 'The caller is not in our system. Greet them warmly and offer to help.';
-                        }
-                    } catch (e) {
-                        console.error('Initial lookup failed:', e);
-                        greetingContext = 'Could not look up caller. Greet them warmly.';
-                    }
-                } else {
-                    greetingContext = 'Greet the caller warmly and offer to help with appointments.';
-                }
-
-                // Make sure OpenAI WS is still open before sending
                 if (openAiWs.readyState !== WebSocket.OPEN) {
-                    console.error('OpenAI WS closed before greeting could be sent');
+                    console.error('OpenAI WS not open when greeting attempted, state:', openAiWs.readyState);
                     return;
                 }
-
                 const greetingItem = {
                     type: 'conversation.item.create',
                     item: {
@@ -339,32 +315,15 @@ fastify.register(async (fastify) => {
                         role: 'user',
                         content: [{
                             type: 'input_text',
-                            text: `[System: ${greetingContext}] Start the conversation with a warm greeting.`
+                            text: `[System: A patient is calling. Greet them warmly, introduce yourself as the AI receptionist, and ask how you can help them today.]`
                         }]
                     }
                 };
-
                 openAiWs.send(JSON.stringify(greetingItem));
                 openAiWs.send(JSON.stringify({ type: 'response.create' }));
                 console.log('Initial greeting sent');
             } catch (e) {
                 console.error('sendInitialGreeting failed:', e);
-                // Still try to send a basic greeting so the call doesn't just hang
-                try {
-                    if (openAiWs.readyState === WebSocket.OPEN) {
-                        openAiWs.send(JSON.stringify({
-                            type: 'conversation.item.create',
-                            item: {
-                                type: 'message',
-                                role: 'user',
-                                content: [{ type: 'input_text', text: '[System: Greet the caller warmly and offer to help with appointments.]' }]
-                            }
-                        }));
-                        openAiWs.send(JSON.stringify({ type: 'response.create' }));
-                    }
-                } catch (e2) {
-                    console.error('Fallback greeting also failed:', e2);
-                }
             }
         };
 

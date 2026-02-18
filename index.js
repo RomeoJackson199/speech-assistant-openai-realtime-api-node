@@ -265,6 +265,7 @@ fastify.register(async (fastify) => {
         let lastAssistantItem = null;
         let markQueue = [];
         let responseStartTimestampTwilio = null;
+        let sessionInitialized = false;
 
         const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview', {
             headers: {
@@ -511,8 +512,18 @@ fastify.register(async (fastify) => {
             console.log('Client disconnected.');
         });
 
-        openAiWs.on('close', () => console.log('Disconnected from OpenAI Realtime API'));
-        openAiWs.on('error', (error) => console.error('OpenAI WebSocket error:', error));
+        openAiWs.on('close', () => {
+            console.log('Disconnected from OpenAI Realtime API');
+            if (connection.readyState === WebSocket.OPEN) {
+                connection.close();
+            }
+        });
+        openAiWs.on('error', (error) => {
+            console.error('OpenAI WebSocket error:', error);
+            if (connection.readyState === WebSocket.OPEN) {
+                connection.close();
+            }
+        });
     });
 });
 

@@ -100,30 +100,27 @@ const buildSystemMessage = () => `You are Eric, a professional and friendly AI d
 
 ## Your Workflow
 
-1. **Start of Call**: Greet the caller warmly. Try to identify them using their phone number (caller ID).
-2. **Patient Identified**: If you find their profile, greet them by name and ask how you can help today.
-3. **Patient Not Found**: If you can't find them, politely ask for their name and let them know you can still help.
+1. **Start of Call**: Greet the caller warmly. Immediately call lookup_patient with their phone number to identify them.
+2. **Patient Identified**: Greet them by name and ask how you can help today.
+3. **Patient Not Found**: Politely ask for their name and offer to help anyway.
 
 4. **Handle Requests**:
-   - **Book Appointment**: Ask for preferred date/time and reason. Check availability, then confirm and book.
-   - **Cancel Appointment**: Look up their appointments, confirm which one to cancel, then cancel it.
-   - **Appointment Info**: Look up and tell them about their upcoming appointments.
+   - **Book Appointment**: Ask for preferred date/time and reason. ALWAYS call check_availability first — never guess or claim no slots exist without calling it. Then confirm a slot and call book_appointment.
+   - **Cancel Appointment**: Call get_patient_appointments to list their bookings, confirm which to cancel, then call cancel_appointment.
+   - **Appointment Info**: Call get_patient_appointments and read out upcoming appointments.
    - **Clinic Info**: Answer questions about hours, location, and services.
 
-## Guidelines
+## CRITICAL RULES
 
-- Be concise - this is a phone conversation
-- Confirm important details by repeating them back
-- Use natural, conversational language
-- When using a tool, briefly tell the patient what you're doing (e.g., "Let me check that for you...")
-- For emergencies, advise calling emergency services
-- If asked about medical advice, explain the dentist will discuss that during the appointment
+- **NEVER say there are no available slots without first calling check_availability.** The clinic has many open slots. Always check.
+- When the patient asks about availability or wants to book, call check_availability immediately with a 7-day range starting from the requested date (or today if no date given).
+- Use YYYY-MM-DD format for all dates.
+- Be concise — this is a phone conversation.
+- Confirm important details by repeating them back.
+- Always confirm before booking or cancelling.
+- For emergencies, advise calling emergency services.
+- Current date: ${new Date().toISOString().split('T')[0]}`;
 
-## Important
-
-- Always confirm before booking or cancelling
-- Current date: ${new Date().toISOString().split('T')[0]}
-- Use the available tools to help patients`;
 
 // Call the Supabase edge function with structured bodies for all tool types
 async function executeToolCall(name, args, callerPhone) {
@@ -148,11 +145,17 @@ async function executeToolCall(name, args, callerPhone) {
             break;
 
         case 'check_availability':
-            // Direct path: action field triggers structured handler in edge function
+            // Default end_date to 7 days after start_date if not provided
+            const startDate = args.start_date || new Date().toISOString().split('T')[0];
+            const endDate = args.end_date || (() => {
+                const d = new Date(startDate);
+                d.setDate(d.getDate() + 7);
+                return d.toISOString().split('T')[0];
+            })();
             body = {
                 action: 'check_availability',
-                start_date: args.start_date,
-                end_date: args.end_date,
+                start_date: startDate,
+                end_date: endDate,
                 time_preference: args.time_preference || 'any',
                 business_id: BUSINESS_ID
             };
@@ -309,8 +312,8 @@ fastify.register(async (fastify) => {
                     return;
                 }
                 const callerInfo = callerPhone
-                    ? `The caller's phone number is ${callerPhone}. Call the lookup_patient tool immediately to identify them, then greet them by name if found.`
-                    : `Greet the caller warmly, introduce yourself as Eric the AI dental receptionist, and ask how you can help.`;
+                    ? `The caller's phone number is ${callerPhone}. Call the lookup_patient tool immediately with this number to identify them, then greet them by name if found. If they want to book an appointment, ALWAYS call check_availability before saying any slots are or aren't available.`
+                    : `Greet the caller warmly, introduce yourself as Eric the AI dental receptionist, and ask how you can help. If they want to book, ALWAYS call check_availability first.`;
 
                 const greetingItem = {
                     type: 'conversation.item.create',

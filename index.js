@@ -19,7 +19,7 @@ fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
 const VOICE = 'alloy';
-const TEMPERATURE = 0.3;
+const TEMPERATURE = 0.6;
 const PORT = process.env.PORT || 5050;
 
 // All real service IDs — AI picks from this list based on reason

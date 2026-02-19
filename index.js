@@ -169,6 +169,8 @@ async function executeToolCall(name, args, callerPhone) {
                 patient_phone: args.patient_phone || callerPhone,
                 appointment_date: args.appointment_date,
                 appointment_time: args.appointment_time,
+                dentist_id: args.dentist_id || null,
+                service_id: args.service_id || null,
                 reason: args.reason,
                 business_id: BUSINESS_ID
             };

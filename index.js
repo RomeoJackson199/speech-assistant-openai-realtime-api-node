@@ -22,7 +22,6 @@ const VOICE = 'alloy';
 const TEMPERATURE = 0.6;
 const PORT = process.env.PORT || 5050;
 
-// Tool definitions - names match what the edge function's conversational flow uses
 const TOOLS = [
     {
         type: 'function',
@@ -39,7 +38,7 @@ const TOOLS = [
     {
         type: 'function',
         name: 'check_availability',
-        description: 'Check available appointment slots for a date range.',
+        description: 'Check available appointment slots. Always call this before booking — never assume slots are unavailable.',
         parameters: {
             type: 'object',
             properties: {
@@ -47,8 +46,12 @@ const TOOLS = [
                 end_date: { type: 'string', description: 'End date in YYYY-MM-DD format' },
                 time_preference: {
                     type: 'string',
-                    enum: ['morning', 'afternoon', 'evening', 'any'],
+                    enum: ['morning', 'afternoon', 'any'],
                     description: 'Preferred time of day'
+                },
+                dentist_id: {
+                    type: 'string',
+                    description: 'Specific dentist ID if patient has a preference'
                 }
             },
             required: ['start_date', 'end_date']
@@ -57,23 +60,25 @@ const TOOLS = [
     {
         type: 'function',
         name: 'book_appointment',
-        description: 'Book an appointment for a patient. Confirm all details before calling this.',
+        description: 'Book an appointment. Use dentist_id and service_id from check_availability results.',
         parameters: {
             type: 'object',
             properties: {
                 patient_name: { type: 'string', description: "Patient's full name" },
                 patient_phone: { type: 'string', description: "Patient's phone number" },
+                dentist_id: { type: 'string', description: 'Dentist ID from check_availability results' },
+                service_id: { type: 'string', description: 'Service ID from check_availability results' },
                 appointment_date: { type: 'string', description: 'Appointment date in YYYY-MM-DD format' },
-                appointment_time: { type: 'string', description: 'Appointment time in HH:MM format (24-hour)' },
+                appointment_time: { type: 'string', description: 'Appointment time in HH:MM 24-hour format' },
                 reason: { type: 'string', description: 'Reason for the appointment' }
             },
-            required: ['patient_name', 'patient_phone', 'appointment_date', 'appointment_time', 'reason']
+            required: ['patient_name', 'patient_phone', 'dentist_id', 'appointment_date', 'appointment_time', 'reason']
         }
     },
     {
         type: 'function',
         name: 'cancel_appointment',
-        description: 'Cancel an existing appointment. Always confirm with patient before cancelling.',
+        description: 'Cancel an existing appointment.',
         parameters: {
             type: 'object',
             properties: {
@@ -96,34 +101,32 @@ const TOOLS = [
     }
 ];
 
-// System message - date computed fresh each call inside initializeSession
-const buildSystemMessage = () => `You are Eric, a professional and friendly AI dental receptionist for Caberu dental clinic. You're speaking to patients over the phone.
+const buildSystemMessage = () => `You are Eric, a professional and friendly AI dental receptionist for Caberu dental clinic. You are speaking to patients over the phone — keep every response to 1-2 short sentences maximum.
 
-## Your Workflow
+## Start of Call
+Greet the caller warmly. Immediately call lookup_patient with their phone number to identify them. If found, greet them by name. If not found, ask for their name and offer to help.
 
-1. **Start of Call**: Greet the caller warmly. Immediately call lookup_patient with their phone number to identify them.
-2. **Patient Identified**: Greet them by name and ask how you can help today.
-3. **Patient Not Found**: Politely ask for their name and offer to help anyway.
+## Booking Flow — follow this order every time
+1. Ask what the reason for the visit is.
+2. If multiple dentists are available in the results, ask which they prefer. If only one, skip this.
+3. Ask what date or time of day they prefer (morning or afternoon).
+4. Call check_availability with the dentist_id and time preference. Then offer at most 3 slots simply — e.g. "I have Tuesday the 24th at 9am or 10am, or Wednesday at 2pm. Which works?"
+5. Patient picks a slot → call book_appointment immediately with dentist_id from the availability results. Do NOT ask them to confirm again.
 
-4. **Handle Requests**:
-   - **Book Appointment**: Ask for preferred date/time and reason. ALWAYS call check_availability first — never guess or claim no slots exist without calling it. Then confirm a slot and call book_appointment.
-   - **Cancel Appointment**: Call get_patient_appointments to list their bookings, confirm which to cancel, then call cancel_appointment.
-   - **Appointment Info**: Call get_patient_appointments and read out upcoming appointments.
-   - **Clinic Info**: Answer questions about hours, location, and services.
+## Other Requests
+- **Cancel**: Call get_patient_appointments to list bookings, confirm which one, then call cancel_appointment.
+- **Appointment info**: Call get_patient_appointments and read out upcoming appointments.
+- **Clinic info**: Answer questions about hours, location, and services.
 
-## CRITICAL RULES
-
-- **NEVER say there are no available slots without first calling check_availability.** The clinic has many open slots. Always check.
-- When the patient asks about availability or wants to book, call check_availability immediately with a 7-day range starting from the requested date (or today if no date given).
-- Use YYYY-MM-DD format for all dates.
-- Be concise — this is a phone conversation.
-- Confirm important details by repeating them back.
-- Always confirm before booking or cancelling.
+## Rules
+- NEVER say there are no slots without first calling check_availability.
+- Never offer more than 3 slots at once.
+- Never ask for confirmation after the patient picks a slot — just book it.
+- Never invent slots — only use results from check_availability.
 - For emergencies, advise calling emergency services.
 - Current date: ${new Date().toISOString().split('T')[0]}`;
 
 
-// Call the Supabase edge function with structured bodies for all tool types
 async function executeToolCall(name, args, callerPhone) {
     console.log(`Executing tool: ${name}`, args);
 
@@ -133,7 +136,6 @@ async function executeToolCall(name, args, callerPhone) {
     }
 
     const edgeFunctionUrl = `${SUPABASE_URL}/functions/v1/voice-call-ai`;
-
     let body = {};
 
     switch (name) {
@@ -146,7 +148,6 @@ async function executeToolCall(name, args, callerPhone) {
             break;
 
         case 'check_availability':
-            // Default end_date to 7 days after start_date if not provided
             const startDate = args.start_date || new Date().toISOString().split('T')[0];
             const endDate = args.end_date || (() => {
                 const d = new Date(startDate);
@@ -158,12 +159,12 @@ async function executeToolCall(name, args, callerPhone) {
                 start_date: startDate,
                 end_date: endDate,
                 time_preference: args.time_preference || 'any',
+                dentist_id: args.dentist_id || null,
                 business_id: BUSINESS_ID
             };
             break;
 
         case 'book_appointment':
-            // Direct path: action field + structured fields
             body = {
                 action: 'book_appointment',
                 patient_name: args.patient_name,
@@ -178,7 +179,6 @@ async function executeToolCall(name, args, callerPhone) {
             break;
 
         case 'cancel_appointment':
-            // Direct path: action field triggers structured handler in edge function
             body = {
                 action: 'cancel_appointment',
                 appointment_id: args.appointment_id,
@@ -187,7 +187,6 @@ async function executeToolCall(name, args, callerPhone) {
             break;
 
         case 'get_patient_appointments':
-            // Reuse patient lookup path - returns patient + upcoming appointments
             body = {
                 action: 'lookup_patient',
                 phone: args.phone || callerPhone,
@@ -211,7 +210,6 @@ async function executeToolCall(name, args, callerPhone) {
             body: JSON.stringify(body)
         });
 
-        // Check HTTP status before parsing
         if (!response.ok) {
             const errorText = await response.text();
             console.error(`Edge function error ${response.status}:`, errorText);
@@ -279,13 +277,12 @@ fastify.register(async (fastify) => {
             }
         });
 
-        // Initialize OpenAI session with tools, then trigger greeting
         const initializeSession = () => {
             const sessionUpdate = {
                 type: 'session.update',
                 session: {
                     modalities: ['text', 'audio'],
-                    instructions: buildSystemMessage(), // Fresh date every call
+                    instructions: buildSystemMessage(),
                     voice: VOICE,
                     input_audio_format: 'g711_ulaw',
                     output_audio_format: 'g711_ulaw',
@@ -303,11 +300,9 @@ fastify.register(async (fastify) => {
             };
             console.log('Sending session update');
             openAiWs.send(JSON.stringify(sessionUpdate));
-            // Wait 400ms for Twilio 'start' event to arrive and set callerPhone
             setTimeout(sendInitialGreeting, 400);
         };
 
-        // Send greeting immediately - no async lookups, just get audio flowing ASAP
         const sendInitialGreeting = () => {
             try {
                 if (openAiWs.readyState !== WebSocket.OPEN) {
@@ -315,8 +310,8 @@ fastify.register(async (fastify) => {
                     return;
                 }
                 const callerInfo = callerPhone
-                    ? `The caller's phone number is ${callerPhone}. Call the lookup_patient tool immediately with this number to identify them, then greet them by name if found. If they want to book an appointment, ALWAYS call check_availability before saying any slots are or aren't available.`
-                    : `Greet the caller warmly, introduce yourself as Eric the AI dental receptionist, and ask how you can help. If they want to book, ALWAYS call check_availability first.`;
+                    ? `The caller's phone number is ${callerPhone}. Call lookup_patient immediately with this number. If found, greet them by name. Then follow the booking flow if they want an appointment.`
+                    : `Greet the caller warmly, introduce yourself as Eric the dental receptionist at Caberu, and ask how you can help.`;
 
                 const greetingItem = {
                     type: 'conversation.item.create',
@@ -489,5 +484,5 @@ fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
     if (err) { console.error(err); process.exit(1); }
     console.log(`Dental Voice Assistant listening on port ${PORT}`);
     console.log(`Supabase: ${SUPABASE_URL ? 'configured' : 'NOT configured'}`);
-    console.log(`Business ID: ${BUSINESS_ID || 'NOT configured'}`);
+    console.log(`Business ID: ${BUSINESS_ID}`);
 });

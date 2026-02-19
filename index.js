@@ -269,7 +269,7 @@ fastify.register(async (fastify) => {
         let markQueue = [];
         let responseStartTimestampTwilio = null;
 
-        const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview', {
+        const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-realtime-mini-2025-10-06', {
             headers: {
                 Authorization: `Bearer ${OPENAI_API_KEY}`,
                 'OpenAI-Beta': 'realtime=v1'

@@ -6,7 +6,8 @@ import fastifyWs from '@fastify/websocket';
 
 dotenv.config();
 
-const { OPENAI_API_KEY, SUPABASE_URL, SUPABASE_ANON_KEY, BUSINESS_ID } = process.env;
+const { OPENAI_API_KEY, SUPABASE_URL, SUPABASE_ANON_KEY } = process.env;
+const BUSINESS_ID = process.env.BUSINESS_ID || 'fd7b4498-6de2-46a9-b9f8-7f136ad06ab6';
 
 if (!OPENAI_API_KEY) {
     console.error('Missing OpenAI API key. Please set it in the .env file.');

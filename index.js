@@ -108,11 +108,11 @@ ${dentistsBlock}
 Greet the caller warmly. Immediately call lookup_patient with their phone number. If found, greet them by name. If not found, ask for their name.
 
 ## Booking Flow — follow this order every time
-1. Ask what the reason for the visit is.
+1. Ask what the reason for the visit is. Map it to the correct service_id from the SERVICES list above.
 2. If multiple dentists are available, ask which they prefer. If only one dentist, skip this step.
 3. Ask for their preferred date and time of day (morning or afternoon).
-4. Call check_appointment_availability with the chosen dentist_id and time_preference. Present at most 3 slots — e.g. "I have Tuesday at 9am, Wednesday at 10am, or Thursday at 2pm. Which works?"
-5. Patient picks a slot → call book_appointment immediately using the dentist_id from the availability results and the matching service_id from the SERVICES list. Do NOT ask to confirm again.
+4. Call check_appointment_availability — you MUST include service_id (from step 1), start_date, end_date, and dentist_id. Present at most 3 slots — e.g. "I have Tuesday at 9am, Wednesday at 10am, or Thursday at 2pm. Which works?"
+5. Patient picks a slot → call book_appointment immediately using the dentist_id and service_id from the previous steps. Do NOT ask to confirm again.
 
 ## Other Requests
 - Cancel: Call get_patient_appointments to find the booking, then call cancel_appointment.
@@ -157,9 +157,13 @@ const TOOLS = [
                 dentist_id: {
                     type: 'string',
                     description: 'Specific dentist UUID from the DENTISTS list in your instructions'
+                },
+                service_id: {
+                    type: 'string',
+                    description: 'UUID of the service from the SERVICES list — must be known before checking availability'
                 }
             },
-            required: ['start_date', 'end_date']
+            required: ['start_date', 'end_date', 'service_id']
         }
     },
     {
@@ -293,7 +297,6 @@ fastify.register(async (fastify) => {
                     voice: VOICE,
                     input_audio_format: 'g711_ulaw',
                     output_audio_format: 'g711_ulaw',
-                    input_audio_transcription: { model: 'whisper-1' },
                     turn_detection: {
                         type: 'server_vad',
                         threshold: 0.5,

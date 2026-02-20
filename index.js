@@ -7,7 +7,7 @@ import fastifyWs from '@fastify/websocket';
 dotenv.config();
 
 const { OPENAI_API_KEY, SUPABASE_URL, SUPABASE_ANON_KEY } = process.env;
-const BUSINESS_ID = process.env.BUSINESS_ID;
+const FALLBACK_BUSINESS_ID = process.env.BUSINESS_ID; // optional fallback for testing
 
 if (!OPENAI_API_KEY) {
     console.error('Missing OPENAI_API_KEY in .env');
@@ -15,10 +15,6 @@ if (!OPENAI_API_KEY) {
 }
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     console.error('Missing SUPABASE_URL or SUPABASE_ANON_KEY in .env');
-    process.exit(1);
-}
-if (!BUSINESS_ID) {
-    console.error('Missing BUSINESS_ID in .env');
     process.exit(1);
 }
 
@@ -31,7 +27,7 @@ const PORT = process.env.PORT || 5050;
 const EDGE_URL = `${SUPABASE_URL}/functions/v1/voice-call-ai`;
 
 // ─── Call Supabase Edge Function ────────────────────────────────────────────
-async function callEdge(body) {
+async function callEdge(body, business_id) {
     const response = await fetch(EDGE_URL, {
         method: 'POST',
         headers: {
@@ -39,7 +35,7 @@ async function callEdge(body) {
             'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
             'apikey': SUPABASE_ANON_KEY,
         },
-        body: JSON.stringify({ ...body, business_id: BUSINESS_ID }),
+        body: JSON.stringify({ ...body, business_id }),
     });
 
     if (!response.ok) {
@@ -51,10 +47,30 @@ async function callEdge(body) {
     return response.json();
 }
 
-// ─── Fetch business context once per call ───────────────────────────────────
-async function fetchBusinessContext() {
+// ─── Lookup business by forwarded phone number ──────────────────────────────
+async function lookupBusinessByPhone(forwardedFrom) {
+    if (!forwardedFrom) {
+        console.warn('No ForwardedFrom — using fallback BUSINESS_ID');
+        return FALLBACK_BUSINESS_ID || null;
+    }
     try {
-        const ctx = await callEdge({ action: 'get_business_context' });
+        const result = await callEdge({ action: 'lookup_business', phone: forwardedFrom }, 'lookup');
+        if (result?.business_id) {
+            console.log(`Business identified: ${result.business_name} (${result.business_id})`);
+            return result.business_id;
+        }
+        console.warn(`No business found for ForwardedFrom: ${forwardedFrom} — using fallback`);
+        return FALLBACK_BUSINESS_ID || null;
+    } catch (err) {
+        console.error('lookupBusinessByPhone error:', err.message);
+        return FALLBACK_BUSINESS_ID || null;
+    }
+}
+
+// ─── Fetch business context once per call ───────────────────────────────────
+async function fetchBusinessContext(business_id) {
+    try {
+        const ctx = await callEdge({ action: 'get_business_context' }, business_id);
         console.log(`Business context loaded: ${ctx.business?.name}, ${ctx.services?.length} services, ${ctx.dentists?.length} dentists`);
         return ctx;
     } catch (err) {
@@ -181,6 +197,7 @@ const TOOLS = [
             properties: {
                 patient_name: { type: 'string', description: 'Patient full name' },
                 patient_phone: { type: 'string', description: 'Patient phone number' },
+                patient_email: { type: 'string', description: 'Patient email address — ask for this if the patient is not recognized' },
                 dentist_id: { type: 'string', description: 'Exact dentist_id from check_appointment_availability results' },
                 service_id: { type: 'string', description: 'UUID from the SERVICES list based on the visit reason' },
                 appointment_date: { type: 'string', description: 'YYYY-MM-DD' },
@@ -217,7 +234,7 @@ const TOOLS = [
 ];
 
 // ─── Execute tool call via edge function ─────────────────────────────────────
-async function executeToolCall(name, args, callerPhone) {
+async function executeToolCall(name, args, callerPhone, businessId) {
     console.log(`Tool call: ${name}`, JSON.stringify(args).substring(0, 200));
 
     const actionMap = {
@@ -237,7 +254,7 @@ async function executeToolCall(name, args, callerPhone) {
     if (!enrichedArgs.patient_phone && callerPhone) enrichedArgs.patient_phone = callerPhone;
 
     try {
-        const result = await callEdge({ action, ...enrichedArgs });
+        const result = await callEdge({ action, ...enrichedArgs }, businessId);
         console.log(`Tool result [${name}]:`, JSON.stringify(result).substring(0, 300));
         return result;
     } catch (err) {
@@ -253,13 +270,15 @@ fastify.get('/', async (request, reply) => {
 
 fastify.all('/incoming-call', async (request, reply) => {
     const callerPhone = request.body?.From || request.query?.From || '';
-    console.log('Incoming call from:', callerPhone || 'unknown');
+    const forwardedFrom = request.body?.ForwardedFrom || request.query?.ForwardedFrom || '';
+    console.log('Incoming call from:', callerPhone || 'unknown', '| ForwardedFrom:', forwardedFrom || 'none');
 
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
         <Stream url="wss://${request.headers.host}/media-stream">
             <Parameter name="callerPhone" value="${callerPhone}" />
+            <Parameter name="forwardedFrom" value="${forwardedFrom}" />
         </Stream>
     </Connect>
 </Response>`;
@@ -274,6 +293,8 @@ fastify.register(async (fastify) => {
 
         let streamSid = null;
         let callerPhone = '';
+        let forwardedFrom = '';
+        let businessId = null;
         let latestMediaTimestamp = 0;
         let lastAssistantItem = null;
         let markQueue = [];
@@ -292,8 +313,9 @@ fastify.register(async (fastify) => {
 
         // ── Session init: fetch context then configure OpenAI ──────────────
         const initializeSession = async () => {
-            // Load business context from DB
-            businessContext = await fetchBusinessContext();
+            // Identify business from ForwardedFrom, then load context
+            businessId = await lookupBusinessByPhone(forwardedFrom);
+            businessContext = await fetchBusinessContext(businessId);
 
             const sessionUpdate = {
                 type: 'session.update',
@@ -352,7 +374,7 @@ fastify.register(async (fastify) => {
 
         // ── Handle function call from AI ────────────────────────────────────
         const handleFunctionCall = async (functionName, callId, args) => {
-            const result = await executeToolCall(functionName, args, callerPhone);
+            const result = await executeToolCall(functionName, args, callerPhone, businessId);
 
             openAiWs.send(JSON.stringify({
                 type: 'conversation.item.create',
@@ -462,7 +484,8 @@ fastify.register(async (fastify) => {
                     case 'start':
                         streamSid = data.start.streamSid;
                         callerPhone = data.start.customParameters?.callerPhone || '';
-                        console.log(`Stream started. SID: ${streamSid}, Caller: ${callerPhone || 'unknown'}`);
+                        forwardedFrom = data.start.customParameters?.forwardedFrom || '';
+                        console.log(`Stream started. SID: ${streamSid}, Caller: ${callerPhone || 'unknown'}, ForwardedFrom: ${forwardedFrom || 'none'}`);
                         responseStartTimestampTwilio = null;
                         latestMediaTimestamp = 0;
                         break;

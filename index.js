@@ -523,7 +523,8 @@ fastify.register(async (fastify) => {
 fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
     if (err) { console.error(err); process.exit(1); }
     console.log(`\n🦷 Caberu Voice Assistant listening on port ${PORT}`);
-    console.log(`   Business ID : ${BUSINESS_ID}`);
+    console.log(`   Mode        : Multi-business (identifies via ForwardedFrom)`);
+    console.log(`   Fallback ID : ${FALLBACK_BUSINESS_ID || 'none'}`);
     console.log(`   Supabase    : ${SUPABASE_URL}`);
     console.log(`\n   Twilio webhook → POST /incoming-call`);
     console.log(`   WebSocket   → wss://your-ngrok.app/media-stream\n`);

@@ -365,7 +365,7 @@ fastify.register(async (fastify) => {
                     item: {
                         type: 'message',
                         role: 'user',
-                        content: [{ type: 'input_text', text:  }],
+                        content: [{ type: 'input_text', text: `[System: Say this naturally and nothing else: "${filler}"]` }],
                     },
                 }));
 

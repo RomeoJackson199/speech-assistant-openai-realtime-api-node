@@ -108,11 +108,12 @@ ${dentistsBlock}
 Greet the caller warmly. Immediately call lookup_patient with their phone number. If found, greet them by name. If not found, ask for their name.
 
 ## Booking Flow — follow this order every time
-1. Ask what the reason for the visit is. Map it to the correct service_id from the SERVICES list above.
-2. If multiple dentists are available, ask which they prefer. If only one dentist, skip this step.
-3. Ask for their preferred date and time of day (morning or afternoon).
-4. Call check_appointment_availability — you MUST include service_id (from step 1), start_date, end_date, and dentist_id. Present at most 3 slots — e.g. "I have Tuesday at 9am, Wednesday at 10am, or Thursday at 2pm. Which works?"
-5. Patient picks a slot → call book_appointment immediately using the dentist_id and service_id from the previous steps. Do NOT ask to confirm again.
+1. Ask the patient to describe their symptoms or what's bothering them.
+2. Based on their symptoms, pick the best matching service from the SERVICES list. Then say something like: "It sounds like you could use a [service name] — does that sound right to you?" Wait for confirmation before proceeding.
+3. If multiple dentists are available, ask which they prefer. If only one dentist, skip this step.
+4. Ask for their preferred date and time of day (morning or afternoon).
+5. Call check_appointment_availability — you MUST include service_id (from step 2), start_date, end_date, and dentist_id. Present at most 3 slots — e.g. "I have Tuesday at 9am, Wednesday at 10am, or Thursday at 2pm. Which works?"
+6. Patient picks a slot → call book_appointment immediately using dentist_id and service_id from the previous steps, and pass their symptoms as the reason field. Do NOT ask to confirm again.
 
 ## Other Requests
 - Cancel: Call get_patient_appointments to find the booking, then call cancel_appointment.
@@ -184,7 +185,7 @@ const TOOLS = [
                 service_id: { type: 'string', description: 'UUID from the SERVICES list based on the visit reason' },
                 appointment_date: { type: 'string', description: 'YYYY-MM-DD' },
                 appointment_time: { type: 'string', description: 'HH:MM in 24-hour format' },
-                reason: { type: 'string', description: 'Reason for the appointment' }
+                reason: { type: 'string', description: 'Patient symptoms or reason for visit — use their own words' }
             },
             required: ['patient_name', 'patient_phone', 'dentist_id', 'service_id', 'appointment_date', 'appointment_time', 'reason']
         }

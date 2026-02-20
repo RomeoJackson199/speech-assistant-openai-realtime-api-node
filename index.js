@@ -273,6 +273,17 @@ fastify.all('/incoming-call', async (request, reply) => {
     const forwardedFrom = request.body?.ForwardedFrom || request.query?.ForwardedFrom || '';
     console.log('Incoming call from:', callerPhone || 'unknown', '| ForwardedFrom:', forwardedFrom || 'none');
 
+    // If no ForwardedFrom and no fallback, we can't identify the business — reject gracefully
+    if (!forwardedFrom && !FALLBACK_BUSINESS_ID) {
+        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice" language="nl-NL">Bedankt voor uw oproep. Dit nummer is niet bereikbaar. Gelieve uw kliniek rechtstreeks te bellen.</Say>
+    <Say voice="alice" language="fr-FR">Merci pour votre appel. Ce numéro n'est pas disponible. Veuillez appeler votre clinique directement.</Say>
+    <Hangup/>
+</Response>`;
+        return reply.type('text/xml').send(twiml);
+    }
+
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>

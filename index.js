@@ -345,8 +345,53 @@ fastify.register(async (fastify) => {
         };
 
         // ── Handle function call from AI ────────────────────────────────────
+        // Filler phrases spoken while the edge function runs in the background
+        const FILLERS = {
+            book_appointment: "I'll go ahead and book that for you, just a moment please!",
+            check_appointment_availability: "Let me check the available slots for you, one moment!",
+            cancel_appointment: "I'll cancel that appointment for you, just a second!",
+            get_patient_appointments: "Let me pull up your appointments, one moment!",
+        };
+
+        let pendingResponseDone = null; // resolves when AI finishes speaking filler
+
         const handleFunctionCall = async (functionName, callId, args) => {
-            const result = await executeToolCall(functionName, args, callerPhone);
+            const filler = FILLERS[functionName];
+
+            if (filler) {
+                // Speak the filler while the edge function runs in parallel
+                openAiWs.send(JSON.stringify({
+                    type: 'conversation.item.create',
+                    item: {
+                        type: 'message',
+                        role: 'user',
+                        content: [{ type: 'input_text', text:  }],
+                    },
+                }));
+
+                // Track when this filler response finishes so we don't overlap
+                pendingResponseDone = new Promise(resolve => {
+                    const listener = (data) => {
+                        try {
+                            const m = JSON.parse(data);
+                            if (m.type === 'response.done') {
+                                openAiWs.off('message', listener);
+                                pendingResponseDone = null;
+                                resolve();
+                            }
+                        } catch {}
+                    };
+                    openAiWs.on('message', listener);
+                });
+
+                openAiWs.send(JSON.stringify({ type: 'response.create' }));
+            }
+
+            // Run edge function in parallel with the filler speech
+            const [result] = await Promise.all([
+                executeToolCall(functionName, args, callerPhone),
+                pendingResponseDone || Promise.resolve(),
+            ]);
 
             openAiWs.send(JSON.stringify({
                 type: 'conversation.item.create',

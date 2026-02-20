@@ -297,12 +297,41 @@ fastify.all('/incoming-call', async (request, reply) => {
     reply.type('text/xml').send(twiml);
 });
 
+// ─── Twilio Status Callback — fires when call ends ───────────────────────────
+fastify.all('/call-status', async (request, reply) => {
+    const params = request.body || request.query || {};
+    const callSid = params.CallSid || '';
+    const callStatus = params.CallStatus || 'completed';
+    const callDuration = parseInt(params.CallDuration || '0', 10);
+    const forwardedFrom = params.ForwardedFrom || '';
+
+    console.log(`Call ended: ${callSid}, status: ${callStatus}, duration: ${callDuration}s`);
+
+    if (callSid) {
+        try {
+            let businessId = FALLBACK_BUSINESS_ID || null;
+            if (forwardedFrom) {
+                const result = await callEdge({ action: 'lookup_business', phone: forwardedFrom }, 'lookup');
+                if (result?.business_id) businessId = result.business_id;
+            }
+            if (businessId) {
+                await callEdge({ action: 'log_call_end', call_sid: callSid, duration_seconds: callDuration, status: callStatus }, businessId);
+            }
+        } catch (err) {
+            console.error('call-status logging error:', err.message);
+        }
+    }
+
+    reply.send('');
+});
+
 // ─── WebSocket / Media Stream handler ────────────────────────────────────────
 fastify.register(async (fastify) => {
     fastify.get('/media-stream', { websocket: true }, (connection, req) => {
         console.log('Media stream connected');
 
         let streamSid = null;
+        let callSid = null;
         let callerPhone = '';
         let forwardedFrom = '';
         let businessId = null;
@@ -327,6 +356,12 @@ fastify.register(async (fastify) => {
             // Identify business from ForwardedFrom, then load context
             businessId = await lookupBusinessByPhone(forwardedFrom);
             businessContext = await fetchBusinessContext(businessId);
+
+            // Log call start
+            if (businessId && callSid) {
+                callEdge({ action: 'log_call_start', call_sid: callSid, caller_phone: callerPhone, forwarded_from: forwardedFrom }, businessId)
+                    .catch(e => console.error('log_call_start failed:', e.message));
+            }
 
             const sessionUpdate = {
                 type: 'session.update',
@@ -494,11 +529,13 @@ fastify.register(async (fastify) => {
                 switch (data.event) {
                     case 'start':
                         streamSid = data.start.streamSid;
+                        callSid = data.start.callSid || null;
                         callerPhone = data.start.customParameters?.callerPhone || '';
                         forwardedFrom = data.start.customParameters?.forwardedFrom || '';
-                        console.log(`Stream started. SID: ${streamSid}, Caller: ${callerPhone || 'unknown'}, ForwardedFrom: ${forwardedFrom || 'none'}`);
+                        console.log(`Stream started. SID: ${streamSid}, CallSid: ${callSid}, Caller: ${callerPhone || 'unknown'}, ForwardedFrom: ${forwardedFrom || 'none'}`);
                         responseStartTimestampTwilio = null;
                         latestMediaTimestamp = 0;
+                        initializeSession();
                         break;
 
                     case 'media':

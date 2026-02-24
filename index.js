@@ -455,6 +455,11 @@ fastify.register(async (fastify) => {
         // Map of callId → { startedAt, name } for in-flight tool calls
         const pendingToolCalls = new Map();
 
+        // ── Readiness flags — init only when both sides are ready ───────────
+        let openAiReady = false;
+        let twilioStartReceived = false;
+        let sessionInitialized = false;
+
         const openAiWs = new WebSocket(
             'wss://api.openai.com/v1/realtime?model=gpt-realtime-mini-2025-12-15',
             {
@@ -599,7 +604,11 @@ fastify.register(async (fastify) => {
         // ── OpenAI WebSocket events ─────────────────────────────────────────
         openAiWs.on('open', () => {
             console.log('Connected to OpenAI Realtime API');
-            setTimeout(initializeSession, 100);
+            openAiReady = true;
+            if (twilioStartReceived && !sessionInitialized) {
+                sessionInitialized = true;
+                initializeSession();
+            }
         });
 
         openAiWs.on('message', async (data) => {
@@ -745,7 +754,11 @@ fastify.register(async (fastify) => {
                         console.log(`Stream started. SID: ${streamSid}, CallSid: ${callSid}, Caller: ${callerPhone || 'unknown'}, ForwardedFrom: ${forwardedFrom || 'none'}`);
                         responseStartTimestampTwilio = null;
                         latestMediaTimestamp = 0;
-                        initializeSession();
+                        twilioStartReceived = true;
+                        if (openAiReady && !sessionInitialized) {
+                            sessionInitialized = true;
+                            initializeSession();
+                        }
                         break;
 
                     case 'media':

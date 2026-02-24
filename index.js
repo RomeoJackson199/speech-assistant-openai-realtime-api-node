@@ -61,7 +61,7 @@ function createSessionData(businessId, callSid, callerPhone) {
     return {
         businessId,
         callSid,
-        patientPhone:      maskPhone(callerPhone),
+        callerPhone:       callerPhone,          // raw — edge function masks it
         startedAt:         new Date(),
         tools:             [],   // { name, calledAt, input, output, durationMs }
         errors:            [],   // { timestamp, code, message, recoverable }
@@ -79,48 +79,46 @@ function createSessionData(businessId, callSid, callerPhone) {
 // Shared between the WebSocket handler and the /call-status callback
 const activeSessions = new Map();
 
-// ─── Persist full call log to Supabase call_logs table ───────────────────────
+// ─── Persist full call log via voice-call-ai edge function ───────────────────
+// Routes through the edge function so it uses the service role key (required
+// by call_logs RLS — anon key cannot INSERT).
 async function saveCallLog(sessionData, durationSeconds, callStatus) {
-    const costs = calculateCost(sessionData, durationSeconds);
-    const record = {
-        business_id:         sessionData.businessId,
-        call_sid:            sessionData.callSid,
-        patient_phone:       sessionData.patientPhone,
-        started_at:          sessionData.startedAt.toISOString(),
-        ended_at:            new Date().toISOString(),
-        duration_seconds:    durationSeconds,
-        call_status:         callStatus,
-        transcript:          sessionData.transcript,
-        tools:               sessionData.tools,
-        errors:              sessionData.errors,
-        input_text_tokens:   sessionData.inputTextTokens,
-        output_text_tokens:  sessionData.outputTextTokens,
-        input_audio_tokens:  sessionData.inputAudioTokens,
-        output_audio_tokens: sessionData.outputAudioTokens,
-        twilio_cost_eur:     costs.twilioCostEur,
-        openai_cost_usd:     costs.openaiCostUsd,
-        openai_cost_eur:     costs.openaiCostEur,
-        total_cost_eur:      costs.totalCostEur,
-        appointment_booked:  sessionData.appointmentBooked,
-        appointment_id:      sessionData.appointmentId || null,
-    };
-
-    const response = await fetch(`${SUPABASE_URL}/rest/v1/call_logs`, {
+    const response = await fetch(EDGE_URL, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
             'apikey': SUPABASE_ANON_KEY,
-            'Prefer': 'return=minimal',
         },
-        body: JSON.stringify(record),
+        body: JSON.stringify({
+            action:               'log_call_details',
+            business_id:          sessionData.businessId,
+            call_sid:             sessionData.callSid,
+            caller_phone:         sessionData.callerPhone,    // raw — masked inside edge fn
+            started_at:           sessionData.startedAt.toISOString(),
+            ended_at:             new Date().toISOString(),
+            duration_seconds:     durationSeconds,
+            status:               callStatus,
+            tools_used:           sessionData.tools,
+            errors:               sessionData.errors,
+            transcript:           sessionData.transcript,
+            input_text_tokens:    sessionData.inputTextTokens,
+            output_text_tokens:   sessionData.outputTextTokens,
+            input_audio_tokens:   sessionData.inputAudioTokens,
+            output_audio_tokens:  sessionData.outputAudioTokens,
+            appointment_booked:   sessionData.appointmentBooked,
+            appointment_id:       sessionData.appointmentId || null,
+        }),
     });
 
     if (!response.ok) {
         const text = await response.text();
-        throw new Error(`call_logs insert ${response.status}: ${text}`);
+        throw new Error(`saveCallLog failed ${response.status}: ${text}`);
     }
-    console.log(`Call log saved — ${sessionData.callSid}, cost: €${costs.totalCostEur.toFixed(4)}`);
+
+    const result = await response.json();
+    const costs = calculateCost(sessionData, durationSeconds);
+    console.log(`Call log saved — ${sessionData.callSid} | cost: €${costs.totalCostEur.toFixed(4)} | log_id: ${result.log_id}`);
 }
 
 // ─── Call Supabase Edge Function ────────────────────────────────────────────
@@ -407,19 +405,13 @@ fastify.all('/call-status', async (request, reply) => {
 
     if (callSid) {
         try {
-            // Resolve businessId (needed for legacy log_call_end and partial-record fallback)
+            // Resolve businessId
             let businessId = FALLBACK_BUSINESS_ID || null;
             if (forwardedFrom) {
                 try {
                     const result = await callEdge({ action: 'lookup_business', phone: forwardedFrom }, 'lookup');
                     if (result?.business_id) businessId = result.business_id;
                 } catch (_) { /* keep fallback */ }
-            }
-
-            // Legacy edge-function log (keep for backward compat)
-            if (businessId) {
-                callEdge({ action: 'log_call_end', call_sid: callSid, duration_seconds: callDuration, status: callStatus }, businessId)
-                    .catch(e => console.error('log_call_end edge error:', e.message));
             }
 
             // Full call log — use accumulated session data if the WS connected
@@ -485,7 +477,7 @@ fastify.register(async (fastify) => {
                 activeSessions.set(callSid, sessionData);
             }
 
-            // Log call start
+            // Log call start (legacy voice_call_logs — kept for backward compat)
             if (businessId && callSid) {
                 callEdge({ action: 'log_call_start', call_sid: callSid, caller_phone: callerPhone, forwarded_from: forwardedFrom }, businessId)
                     .catch(e => console.error('log_call_start failed:', e.message));
@@ -571,7 +563,7 @@ fastify.register(async (fastify) => {
             }));
             openAiWs.send(JSON.stringify({ type: 'response.create' }));
 
-            return result; // returned so the caller can log it with timing
+            return result;
         };
 
         // ── Interrupt handling: user spoke while AI was talking ─────────────

@@ -26,6 +26,103 @@ const VOICE = 'alloy';
 const PORT = process.env.PORT || 5050;
 const EDGE_URL = `${SUPABASE_URL}/functions/v1/voice-call-ai`;
 
+// ─── Cost calculation constants (update here to change pricing) ───────────────
+const OPENAI_TEXT_INPUT_PER_M  = 0.60;   // USD per 1M tokens
+const OPENAI_TEXT_OUTPUT_PER_M = 2.40;   // USD per 1M tokens
+const OPENAI_AUDIO_INPUT_PER_M = 10.00;  // USD per 1M tokens
+const OPENAI_AUDIO_OUTPUT_PER_M = 20.00; // USD per 1M tokens
+const TWILIO_PER_MIN_EUR = 0.008;
+const USD_TO_EUR = 0.92;
+
+// ─── Utility: Phone masking ───────────────────────────────────────────────────
+// Keeps last 2 digits visible: +32 456 78 89 → +32 XXX XX XX 89
+function maskPhone(phone) {
+    if (!phone || phone.length < 4) return phone || '';
+    const last2 = phone.slice(-2);
+    const maskedPrefix = phone.slice(0, -2).replace(/\d/g, 'X');
+    return maskedPrefix + last2;
+}
+
+// ─── Utility: Cost calculator ─────────────────────────────────────────────────
+function calculateCost(sessionData, durationSeconds) {
+    const twilioCostEur = (durationSeconds / 60) * TWILIO_PER_MIN_EUR;
+    const openaiCostUsd =
+        (sessionData.inputTextTokens  / 1_000_000) * OPENAI_TEXT_INPUT_PER_M  +
+        (sessionData.outputTextTokens / 1_000_000) * OPENAI_TEXT_OUTPUT_PER_M +
+        (sessionData.inputAudioTokens / 1_000_000) * OPENAI_AUDIO_INPUT_PER_M +
+        (sessionData.outputAudioTokens / 1_000_000) * OPENAI_AUDIO_OUTPUT_PER_M;
+    const openaiCostEur = openaiCostUsd * USD_TO_EUR;
+    const totalCostEur  = twilioCostEur + openaiCostEur;
+    return { twilioCostEur, openaiCostUsd, openaiCostEur, totalCostEur };
+}
+
+// ─── Session data factory ─────────────────────────────────────────────────────
+function createSessionData(businessId, callSid, callerPhone) {
+    return {
+        businessId,
+        callSid,
+        patientPhone:      maskPhone(callerPhone),
+        startedAt:         new Date(),
+        tools:             [],   // { name, calledAt, input, output, durationMs }
+        errors:            [],   // { timestamp, code, message, recoverable }
+        transcript:        [],   // { role, content, timestamp }
+        inputTextTokens:   0,
+        outputTextTokens:  0,
+        inputAudioTokens:  0,
+        outputAudioTokens: 0,
+        appointmentBooked: false,
+        appointmentId:     null,
+    };
+}
+
+// ─── Active sessions store: callSid → sessionData ─────────────────────────────
+// Shared between the WebSocket handler and the /call-status callback
+const activeSessions = new Map();
+
+// ─── Persist full call log to Supabase call_logs table ───────────────────────
+async function saveCallLog(sessionData, durationSeconds, callStatus) {
+    const costs = calculateCost(sessionData, durationSeconds);
+    const record = {
+        business_id:         sessionData.businessId,
+        call_sid:            sessionData.callSid,
+        patient_phone:       sessionData.patientPhone,
+        started_at:          sessionData.startedAt.toISOString(),
+        ended_at:            new Date().toISOString(),
+        duration_seconds:    durationSeconds,
+        call_status:         callStatus,
+        transcript:          sessionData.transcript,
+        tools:               sessionData.tools,
+        errors:              sessionData.errors,
+        input_text_tokens:   sessionData.inputTextTokens,
+        output_text_tokens:  sessionData.outputTextTokens,
+        input_audio_tokens:  sessionData.inputAudioTokens,
+        output_audio_tokens: sessionData.outputAudioTokens,
+        twilio_cost_eur:     costs.twilioCostEur,
+        openai_cost_usd:     costs.openaiCostUsd,
+        openai_cost_eur:     costs.openaiCostEur,
+        total_cost_eur:      costs.totalCostEur,
+        appointment_booked:  sessionData.appointmentBooked,
+        appointment_id:      sessionData.appointmentId || null,
+    };
+
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/call_logs`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'apikey': SUPABASE_ANON_KEY,
+            'Prefer': 'return=minimal',
+        },
+        body: JSON.stringify(record),
+    });
+
+    if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`call_logs insert ${response.status}: ${text}`);
+    }
+    console.log(`Call log saved — ${sessionData.callSid}, cost: €${costs.totalCostEur.toFixed(4)}`);
+}
+
 // ─── Call Supabase Edge Function ────────────────────────────────────────────
 async function callEdge(body, business_id) {
     const response = await fetch(EDGE_URL, {
@@ -304,18 +401,38 @@ fastify.all('/call-status', async (request, reply) => {
     const callStatus = params.CallStatus || 'completed';
     const callDuration = parseInt(params.CallDuration || '0', 10);
     const forwardedFrom = params.ForwardedFrom || '';
+    const callerFrom = params.From || params.Caller || '';
 
     console.log(`Call ended: ${callSid}, status: ${callStatus}, duration: ${callDuration}s`);
 
     if (callSid) {
         try {
+            // Resolve businessId (needed for legacy log_call_end and partial-record fallback)
             let businessId = FALLBACK_BUSINESS_ID || null;
             if (forwardedFrom) {
-                const result = await callEdge({ action: 'lookup_business', phone: forwardedFrom }, 'lookup');
-                if (result?.business_id) businessId = result.business_id;
+                try {
+                    const result = await callEdge({ action: 'lookup_business', phone: forwardedFrom }, 'lookup');
+                    if (result?.business_id) businessId = result.business_id;
+                } catch (_) { /* keep fallback */ }
             }
+
+            // Legacy edge-function log (keep for backward compat)
             if (businessId) {
-                await callEdge({ action: 'log_call_end', call_sid: callSid, duration_seconds: callDuration, status: callStatus }, businessId);
+                callEdge({ action: 'log_call_end', call_sid: callSid, duration_seconds: callDuration, status: callStatus }, businessId)
+                    .catch(e => console.error('log_call_end edge error:', e.message));
+            }
+
+            // Full call log — use accumulated session data if the WS connected
+            const session = activeSessions.get(callSid);
+            if (session) {
+                // Normal path: session was fully established
+                await saveCallLog(session, callDuration, callStatus);
+                activeSessions.delete(callSid);
+            } else if (businessId) {
+                // Edge case: call dropped before WebSocket connected — save minimal record
+                console.warn(`No active session for ${callSid} — saving partial record`);
+                const partialSession = createSessionData(businessId, callSid, callerFrom);
+                await saveCallLog(partialSession, callDuration, callStatus);
             }
         } catch (err) {
             console.error('call-status logging error:', err.message);
@@ -341,6 +458,11 @@ fastify.register(async (fastify) => {
         let responseStartTimestampTwilio = null;
         let businessContext = null;
 
+        // ── Call logging state ──────────────────────────────────────────────
+        let sessionData = null;
+        // Map of callId → { startedAt, name, input } for in-flight tool calls
+        const pendingToolCalls = new Map();
+
         const openAiWs = new WebSocket(
             'wss://api.openai.com/v1/realtime?model=gpt-realtime-mini-2025-12-15',
             {
@@ -357,6 +479,12 @@ fastify.register(async (fastify) => {
             businessId = await lookupBusinessByPhone(forwardedFrom);
             businessContext = await fetchBusinessContext(businessId);
 
+            // Initialize session logging data (only once, when callSid is known)
+            if (!sessionData && callSid) {
+                sessionData = createSessionData(businessId, callSid, callerPhone);
+                activeSessions.set(callSid, sessionData);
+            }
+
             // Log call start
             if (businessId && callSid) {
                 callEdge({ action: 'log_call_start', call_sid: callSid, caller_phone: callerPhone, forwarded_from: forwardedFrom }, businessId)
@@ -371,6 +499,8 @@ fastify.register(async (fastify) => {
                     voice: VOICE,
                     input_audio_format: 'g711_ulaw',
                     output_audio_format: 'g711_ulaw',
+                    // Enable transcription so we can log full utterances
+                    input_audio_transcription: { model: 'whisper-1' },
                     turn_detection: {
                         type: 'server_vad',
                         threshold: 0.5,
@@ -422,6 +552,15 @@ fastify.register(async (fastify) => {
         const handleFunctionCall = async (functionName, callId, args) => {
             const result = await executeToolCall(functionName, args, callerPhone, businessId);
 
+            // Track appointment booking outcome
+            if (functionName === 'book_appointment' && sessionData) {
+                const appointmentId = result?.appointment_id || result?.id || null;
+                if (appointmentId) {
+                    sessionData.appointmentBooked = true;
+                    sessionData.appointmentId = appointmentId;
+                }
+            }
+
             openAiWs.send(JSON.stringify({
                 type: 'conversation.item.create',
                 item: {
@@ -431,6 +570,8 @@ fastify.register(async (fastify) => {
                 },
             }));
             openAiWs.send(JSON.stringify({ type: 'response.create' }));
+
+            return result; // returned so the caller can log it with timing
         };
 
         // ── Interrupt handling: user spoke while AI was talking ─────────────
@@ -489,27 +630,90 @@ fastify.register(async (fastify) => {
                         }
                         break;
 
-                    case 'response.function_call_arguments.done':
+                    case 'response.function_call_arguments.done': {
+                        // Record tool call start time before executing
+                        const toolStartedAt = new Date();
+                        pendingToolCalls.set(msg.call_id, {
+                            startedAt: toolStartedAt,
+                            name: msg.name,
+                        });
                         try {
                             const args = JSON.parse(msg.arguments);
-                            await handleFunctionCall(msg.name, msg.call_id, args);
+                            const result = await handleFunctionCall(msg.name, msg.call_id, args);
+                            // Log completed tool call with timing and I/O
+                            if (sessionData) {
+                                const pending = pendingToolCalls.get(msg.call_id);
+                                if (pending) {
+                                    sessionData.tools.push({
+                                        name:       msg.name,
+                                        calledAt:   pending.startedAt,
+                                        input:      args,
+                                        output:     result,
+                                        durationMs: Date.now() - pending.startedAt.getTime(),
+                                    });
+                                    pendingToolCalls.delete(msg.call_id);
+                                }
+                            }
                         } catch (e) {
                             console.error('Failed to parse function args:', e);
+                            pendingToolCalls.delete(msg.call_id);
                         }
                         break;
+                    }
 
                     case 'input_audio_buffer.speech_started':
                         handleSpeechStarted();
                         break;
 
+                    // ── User utterance transcript (complete, not deltas) ────
+                    case 'conversation.item.input_audio_transcription.completed':
+                        if (sessionData && msg.transcript) {
+                            sessionData.transcript.push({
+                                role:      'user',
+                                content:   msg.transcript,
+                                timestamp: new Date(),
+                            });
+                        }
+                        break;
+
+                    // ── Assistant utterance transcript (complete) ───────────
+                    case 'response.audio_transcript.done':
+                        if (sessionData && msg.transcript) {
+                            sessionData.transcript.push({
+                                role:      'assistant',
+                                content:   msg.transcript,
+                                timestamp: new Date(),
+                            });
+                        }
+                        break;
+
+                    // ── Token usage — accumulate across all responses ───────
+                    case 'response.done':
+                        console.log(`OpenAI event: ${msg.type}`);
+                        if (sessionData && msg.response?.usage) {
+                            const u = msg.response.usage;
+                            sessionData.inputTextTokens   += u.input_token_details?.text_tokens  ?? 0;
+                            sessionData.outputTextTokens  += u.output_token_details?.text_tokens ?? 0;
+                            sessionData.inputAudioTokens  += u.input_token_details?.audio_tokens  ?? 0;
+                            sessionData.outputAudioTokens += u.output_token_details?.audio_tokens ?? 0;
+                        }
+                        break;
+
                     case 'error':
                         console.error('OpenAI error event:', msg.error);
+                        if (sessionData && msg.error) {
+                            sessionData.errors.push({
+                                timestamp:   new Date(),
+                                code:        msg.error.code    || 'unknown',
+                                message:     msg.error.message || String(msg.error),
+                                recoverable: msg.error.type !== 'invalid_request_error',
+                            });
+                        }
                         break;
 
                     case 'session.created':
                     case 'session.updated':
                     case 'response.content.done':
-                    case 'response.done':
                         console.log(`OpenAI event: ${msg.type}`);
                         break;
                 }
@@ -518,8 +722,22 @@ fastify.register(async (fastify) => {
             }
         });
 
-        openAiWs.on('close', () => console.log('OpenAI WS disconnected'));
-        openAiWs.on('error', (err) => console.error('OpenAI WS error:', err));
+        openAiWs.on('close', () => {
+            console.log('OpenAI WS disconnected');
+            // sessionData remains in activeSessions — the Twilio status callback
+            // will finalize and persist it when the call fully ends.
+        });
+        openAiWs.on('error', (err) => {
+            console.error('OpenAI WS error:', err);
+            if (sessionData) {
+                sessionData.errors.push({
+                    timestamp:   new Date(),
+                    code:        err.code || 'ws_error',
+                    message:     err.message || String(err),
+                    recoverable: false,
+                });
+            }
+        });
 
         // ── Twilio WebSocket events ─────────────────────────────────────────
         connection.on('message', (message) => {
@@ -562,7 +780,8 @@ fastify.register(async (fastify) => {
 
         connection.on('close', () => {
             if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
-            console.log('Call ended.');
+            console.log('Twilio media stream closed.');
+            // sessionData stays in activeSessions until /call-status fires and saves it.
         });
     });
 });

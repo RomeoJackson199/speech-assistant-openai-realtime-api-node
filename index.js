@@ -226,9 +226,9 @@ ${servicesBlock}
 ${dentistsBlock}
 
 ## Start of Call
-Greet the caller warmly. Immediately call lookup_patient with their phone number.
-- If found → greet them by name and ask how you can help.
-- If NOT found → say something like "I don't seem to have you in our system yet — could I get your first and last name?" Once they provide their name, immediately call register_patient with their phone number, first name, and last name. **Do NOT ask for an email address or any other details.** After registration, let them know: "I've set you up in our system! You'll receive a text message with a link to complete your profile at your convenience." Then continue to the booking flow.
+Introduce yourself warmly: "Hello! I'm the receptionist for ${businessName}. One moment while I check if you're in our system." Then IMMEDIATELY call lookup_patient with their phone number. Do NOT wait for the caller to speak.
+- If found → greet them by name: "Hi [name]! How can I help you today?"
+- If NOT found → say: "I can't seem to find you in our system. Can I set you up? What is your first and last name?" Once they provide their name, call register_patient with their phone number, first name, and last name. **Do NOT ask for an email address.** After registration, let them know they'll receive a text message with a link to complete their profile. Then continue to the booking flow.
 
 ## Booking Flow — follow this order every time
 1. Ask the patient to describe their symptoms or what's bothering them. **Remember their exact words — you MUST pass this as the 'reason' field when calling book_appointment.**
@@ -486,6 +486,7 @@ fastify.register(async (fastify) => {
         let businessContext = null;
 
         let sessionData = null;
+        let callerMuted = true; // Mute caller until initial lookup completes
         const pendingToolCalls = new Map();
 
         const openAiWs = new WebSocket(
@@ -545,11 +546,10 @@ fastify.register(async (fastify) => {
             }
 
             const businessName = businessContext?.business?.name || 'the clinic';
-            const greeting = businessContext?.business?.ai_greeting || '';
 
             const instruction = callerPhone
-                ? `[System: The caller's phone number is ${callerPhone}. Call lookup_patient immediately with this number. If found, greet them by name and ask how you can help. If not found, introduce yourself as the receptionist for ${businessName}, say you don't have them in the system yet, ask for their first and last name only (do NOT ask for email), then call register_patient with their phone number and the name they provide. After registration, mention they'll receive a text with a link to complete their profile.]`
-                : `[System: Greet the caller warmly, introduce yourself as the receptionist for ${businessName}${greeting ? ` — "${greeting}"` : ''}, and ask how you can help.]`;
+                ? `[System: Greet the caller warmly. Say exactly something like: "Hello! I'm the receptionist for ${businessName}. One moment while I check if you're in our system." Then IMMEDIATELY call lookup_patient with phone number ${callerPhone}. Do NOT wait for the caller to respond — just greet and look them up right away. After the lookup completes: if found, say "Hi [name]! How can I help you today?" If NOT found, say something like "I can't seem to find you in our system. Can I set you up? What is your first and last name?" Then wait for their name and call register_patient.]`
+                : `[System: Greet the caller warmly, introduce yourself as the receptionist for ${businessName}, and ask how you can help.]`;
 
             try {
                 openAiWs.send(JSON.stringify({
@@ -561,7 +561,14 @@ fastify.register(async (fastify) => {
                     },
                 }));
                 openAiWs.send(JSON.stringify({ type: 'response.create' }));
-                console.log('Initial greeting sent');
+                console.log('Initial greeting sent (caller muted until lookup completes)');
+                // Safety: auto-unmute after 8s in case lookup never returns
+                setTimeout(() => {
+                    if (callerMuted) {
+                        callerMuted = false;
+                        console.log('Safety unmute triggered after 8s timeout');
+                    }
+                }, 8000);
             } catch (e) {
                 console.error('sendInitialGreeting failed:', e);
             }
@@ -569,6 +576,14 @@ fastify.register(async (fastify) => {
 
         const handleFunctionCall = async (functionName, callId, args) => {
             const result = await executeToolCall(functionName, args, callerPhone, businessId);
+
+            // Unmute caller after initial lookup or registration completes
+            if (functionName === 'lookup_patient' || functionName === 'register_patient') {
+                if (callerMuted) {
+                    callerMuted = false;
+                    console.log('Caller unmuted after', functionName);
+                }
+            }
 
             if (functionName === 'book_appointment' && sessionData) {
                 const appointmentId = result?.appointment_id || result?.id || null;
@@ -767,7 +782,7 @@ fastify.register(async (fastify) => {
 
                     case 'media':
                         latestMediaTimestamp = data.media.timestamp;
-                        if (openAiWs.readyState === WebSocket.OPEN) {
+                        if (openAiWs.readyState === WebSocket.OPEN && !callerMuted) {
                             openAiWs.send(JSON.stringify({
                                 type: 'input_audio_buffer.append',
                                 audio: data.media.payload,

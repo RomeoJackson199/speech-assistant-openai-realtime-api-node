@@ -170,6 +170,22 @@ async function fetchBusinessContext(business_id) {
     }
 }
 
+// ─── Send profile completion link via SMS ───────────────────────────────────
+async function sendProfileCompletionLink(phone, businessId) {
+    try {
+        const result = await callEdge({
+            action: 'send_profile_completion_link',
+            phone,
+        }, businessId);
+        console.log(`Profile completion link sent to ${maskPhone(phone)}`);
+        return result;
+    } catch (err) {
+        console.error('Failed to send profile completion link:', err.message);
+        // Non-critical — don't throw, the call should continue
+        return null;
+    }
+}
+
 // ─── Build system prompt from DB context ────────────────────────────────────
 function buildSystemMessage(ctx) {
     const today = new Date().toISOString().split('T')[0];
@@ -212,7 +228,7 @@ ${dentistsBlock}
 ## Start of Call
 Greet the caller warmly. Immediately call lookup_patient with their phone number.
 - If found → greet them by name and ask how you can help.
-- If NOT found → say something like "I don't seem to have you in our system yet — could I get your first and last name?" Once they provide their name, immediately call register_patient with their phone number, first name, and last name. Then continue normally.
+- If NOT found → say something like "I don't seem to have you in our system yet — could I get your first and last name?" Once they provide their name, immediately call register_patient with their phone number, first name, and last name. **Do NOT ask for an email address or any other details.** After registration, let them know: "I've set you up in our system! You'll receive a text message with a link to complete your profile at your convenience." Then continue to the booking flow.
 
 ## Booking Flow — follow this order every time
 1. Ask the patient to describe their symptoms or what's bothering them. **Remember their exact words — you MUST pass this as the 'reason' field when calling book_appointment.**
@@ -230,6 +246,7 @@ Once book_appointment returns successfully, confirm the booking in one sentence 
 - View appointments: Call get_patient_appointments and read them out clearly.
 
 ## Rules
+- Never ask for an email address on the phone. A profile completion link is sent automatically via SMS.
 - Never offer more than 3 slots at once.
 - Never ask for confirmation after patient picks a slot — just book it immediately.
 - Never check availability for today — start_date must always be tomorrow or later.
@@ -261,14 +278,13 @@ const TOOLS = [
     {
         type: 'function',
         name: 'register_patient',
-        description: 'Create a new patient profile when the caller is not found by lookup_patient.',
+        description: 'Create a new patient profile when the caller is not found by lookup_patient. Only requires name and phone — a profile completion link will be sent via SMS automatically.',
         parameters: {
             type: 'object',
             properties: {
                 first_name: { type: 'string', description: 'Patient first name' },
                 last_name:  { type: 'string', description: 'Patient last name' },
                 phone:      { type: 'string', description: 'Patient phone number' },
-                email:      { type: 'string', description: 'Patient email address (optional)' }
             },
             required: ['first_name', 'last_name', 'phone']
         }
@@ -308,7 +324,6 @@ const TOOLS = [
             properties: {
                 patient_name: { type: 'string', description: 'Patient full name' },
                 patient_phone: { type: 'string', description: 'Patient phone number' },
-                patient_email: { type: 'string', description: 'Patient email address — ask for this if the patient is not recognized' },
                 dentist_id: { type: 'string', description: 'Exact dentist_id from check_appointment_availability results' },
                 service_id: { type: 'string', description: 'UUID from the SERVICES list based on the visit reason' },
                 appointment_date: { type: 'string', description: 'YYYY-MM-DD' },
@@ -367,6 +382,15 @@ async function executeToolCall(name, args, callerPhone, businessId) {
     try {
         const result = await callEdge({ action, ...enrichedArgs }, businessId);
         console.log(`Tool result [${name}]:`, JSON.stringify(result).substring(0, 300));
+
+        // After successful registration, automatically send profile completion link via SMS
+        if (name === 'register_patient' && result && !result.error) {
+            const phone = args.phone || callerPhone;
+            if (phone) {
+                sendProfileCompletionLink(phone, businessId); // fire-and-forget
+            }
+        }
+
         return result;
     } catch (err) {
         console.error(`Tool error [${name}]:`, err.message);
@@ -524,7 +548,7 @@ fastify.register(async (fastify) => {
             const greeting = businessContext?.business?.ai_greeting || '';
 
             const instruction = callerPhone
-                ? `[System: The caller's phone number is ${callerPhone}. Call lookup_patient immediately with this number. If found, greet them by name and ask how you can help. If not found, introduce yourself as the receptionist for ${businessName}, say you don't have them in the system yet, ask for their first and last name, then call register_patient with their phone number and the name they provide.]`
+                ? `[System: The caller's phone number is ${callerPhone}. Call lookup_patient immediately with this number. If found, greet them by name and ask how you can help. If not found, introduce yourself as the receptionist for ${businessName}, say you don't have them in the system yet, ask for their first and last name only (do NOT ask for email), then call register_patient with their phone number and the name they provide. After registration, mention they'll receive a text with a link to complete their profile.]`
                 : `[System: Greet the caller warmly, introduce yourself as the receptionist for ${businessName}${greeting ? ` — "${greeting}"` : ''}, and ask how you can help.]`;
 
             try {

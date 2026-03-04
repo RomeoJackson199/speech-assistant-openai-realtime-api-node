@@ -7,6 +7,10 @@ import fastifyWs from '@fastify/websocket';
 dotenv.config();
 
 const { OPENAI_API_KEY, SUPABASE_URL, SUPABASE_ANON_KEY } = process.env;
+const TWILIO_ACCOUNT_SID  = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN   = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_FROM_NUMBER  = process.env.TWILIO_FROM_NUMBER;
+const PROFILE_SETUP_URL   = process.env.PROFILE_SETUP_URL;
 const FALLBACK_BUSINESS_ID = process.env.BUSINESS_ID; // optional fallback for testing
 
 if (!OPENAI_API_KEY) {
@@ -138,6 +142,44 @@ async function callEdge(body, business_id) {
     return response.json();
 }
 
+// ─── Send profile setup link via SMS ─────────────────────────────────────────
+async function sendProfileSetupSms(toPhone) {
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER || !PROFILE_SETUP_URL) {
+        console.warn('SMS not sent — missing TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, or PROFILE_SETUP_URL in .env');
+        return;
+    }
+
+    const credentials = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+    const messageBody = `Welcome! Please complete your profile here: ${PROFILE_SETUP_URL}`;
+
+    try {
+        const response = await fetch(
+            `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
+            {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Basic ${credentials}`,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: new URLSearchParams({
+                    From: TWILIO_FROM_NUMBER,
+                    To:   toPhone,
+                    Body: messageBody,
+                }).toString(),
+            }
+        );
+
+        if (response.ok) {
+            console.log(`Profile setup SMS sent to ${maskPhone(toPhone)}`);
+        } else {
+            const text = await response.text();
+            console.error(`SMS send failed ${response.status}:`, text);
+        }
+    } catch (err) {
+        console.error('sendProfileSetupSms error:', err.message);
+    }
+}
+
 // ─── Lookup business by forwarded phone number ──────────────────────────────
 async function lookupBusinessByPhone(forwardedFrom) {
     if (!forwardedFrom) {
@@ -212,7 +254,7 @@ ${dentistsBlock}
 ## Start of Call
 Greet the caller warmly. Immediately call lookup_patient with their phone number.
 - If found → greet them by name and ask how you can help.
-- If NOT found → say something like "I don't seem to have you in our system yet — could I get your first and last name?" Once they provide their name, immediately call register_patient with their phone number, first name, and last name. Then continue normally.
+- If NOT found → immediately call register_patient with just their phone number — do NOT ask for their name or email. After registering, say something like "I've set up a quick profile for you and sent a text with a link to complete your details. How can I help you today?"
 
 ## Booking Flow — follow this order every time
 1. Ask the patient to describe their symptoms or what's bothering them. **Remember their exact words — you MUST pass this as the 'reason' field when calling book_appointment.**
@@ -261,16 +303,13 @@ const TOOLS = [
     {
         type: 'function',
         name: 'register_patient',
-        description: 'Create a new patient profile when the caller is not found by lookup_patient.',
+        description: 'Create a minimal patient profile using only the caller\'s phone number. Call this immediately when lookup_patient finds no result — do NOT ask for the caller\'s name or email first.',
         parameters: {
             type: 'object',
             properties: {
-                first_name: { type: 'string', description: 'Patient first name' },
-                last_name:  { type: 'string', description: 'Patient last name' },
-                phone:      { type: 'string', description: 'Patient phone number' },
-                email:      { type: 'string', description: 'Patient email address (optional)' }
+                phone: { type: 'string', description: 'Patient phone number' }
             },
-            required: ['first_name', 'last_name', 'phone']
+            required: ['phone']
         }
     },
     {
@@ -524,7 +563,7 @@ fastify.register(async (fastify) => {
             const greeting = businessContext?.business?.ai_greeting || '';
 
             const instruction = callerPhone
-                ? `[System: The caller's phone number is ${callerPhone}. Call lookup_patient immediately with this number. If found, greet them by name and ask how you can help. If not found, introduce yourself as the receptionist for ${businessName}, say you don't have them in the system yet, ask for their first and last name, then call register_patient with their phone number and the name they provide.]`
+                ? `[System: The caller's phone number is ${callerPhone}. Call lookup_patient immediately with this number. If found, greet them by name and ask how you can help. If not found, call register_patient immediately using only their phone number — do NOT ask for their name or email. Once registered, tell them: "I've set up a quick profile for you and sent a text with a link to complete your details." Then ask how you can help.]`
                 : `[System: Greet the caller warmly, introduce yourself as the receptionist for ${businessName}${greeting ? ` — "${greeting}"` : ''}, and ask how you can help.]`;
 
             try {
@@ -545,6 +584,10 @@ fastify.register(async (fastify) => {
 
         const handleFunctionCall = async (functionName, callId, args) => {
             const result = await executeToolCall(functionName, args, callerPhone, businessId);
+
+            if (functionName === 'register_patient' && callerPhone && !result?.error) {
+                sendProfileSetupSms(callerPhone).catch(e => console.error('SMS error:', e.message));
+            }
 
             if (functionName === 'book_appointment' && sessionData) {
                 const appointmentId = result?.appointment_id || result?.id || null;

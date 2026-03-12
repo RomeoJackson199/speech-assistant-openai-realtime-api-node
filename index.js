@@ -38,10 +38,9 @@ const TWILIO_PER_MIN_EUR = 0.008;
 const USD_TO_EUR = 0.92;
 
 // ─── Utility: Brussels timezone helpers ───────────────────────────────────────
-// FIX: All date/time calculations now use Brussels timezone instead of UTC
 function getBrusselsDate() {
     const now = new Date();
-    return now.toLocaleDateString('en-CA', { timeZone: BUSINESS_TIMEZONE }); // YYYY-MM-DD
+    return now.toLocaleDateString('en-CA', { timeZone: BUSINESS_TIMEZONE });
 }
 
 function getBrusselsDayName() {
@@ -54,7 +53,6 @@ function getBrusselsTime() {
     return now.toLocaleTimeString('en-GB', { timeZone: BUSINESS_TIMEZONE, hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
-// Get Brussels day-of-week index (0=Sun, 6=Sat)
 function getBrusselsDow() {
     const now = new Date();
     const dayName = now.toLocaleDateString('en-US', { timeZone: BUSINESS_TIMEZONE, weekday: 'long' });
@@ -62,10 +60,8 @@ function getBrusselsDow() {
     return map[dayName] ?? 0;
 }
 
-// Pre-calculate next occurrence of each weekday (always tomorrow or later) in Brussels timezone
 function getNextWeekdayDates() {
     const now = new Date();
-    // Parse Brussels "today" components
     const parts = new Intl.DateTimeFormat('en-US', {
         timeZone: BUSINESS_TIMEZONE,
         year: 'numeric', month: 'numeric', day: 'numeric'
@@ -81,7 +77,7 @@ function getNextWeekdayDates() {
     const result = {};
     for (let dow = 0; dow < 7; dow++) {
         let delta = (dow - todayDow + 7) % 7;
-        if (delta === 0) delta = 7; // never today, always next week
+        if (delta === 0) delta = 7;
         const d = new Date(Date.UTC(year, month - 1, day + delta));
         const dateStr = d.toISOString().split('T')[0];
         result[dayNames[dow]] = dateStr;
@@ -236,28 +232,21 @@ async function sendProfileCompletionLink(phone, businessId) {
         return result;
     } catch (err) {
         console.error('Failed to send profile completion link:', err.message);
-        // Non-critical — don't throw, the call should continue
         return null;
     }
 }
 
 // ─── Build system prompt from DB context ────────────────────────────────────
 function buildSystemMessage(ctx) {
-    // ═══════════════════════════════════════════════════════════════════════
-    // FIX #2: Use Brussels timezone for date AND include day-of-week name
-    // OLD: const today = new Date().toISOString().split('T')[0];
-    // This was UTC and had no day name → AI miscalculated weekdays
-    // ═══════════════════════════════════════════════════════════════════════
-    const today = getBrusselsDate();           // e.g. "2026-03-10"
-    const dayName = getBrusselsDayName();      // e.g. "Tuesday"
-    const currentTime = getBrusselsTime();     // e.g. "14:30"
-    const nextDates = getNextWeekdayDates();   // pre-calculated next occurrence of each day
-    
-    // Build a lookup table so AI never has to calculate dates
+    const today = getBrusselsDate();
+    const dayName = getBrusselsDayName();
+    const currentTime = getBrusselsTime();
+    const nextDates = getNextWeekdayDates();
+
     const dateTableLines = Object.entries(nextDates)
         .map(([d, date]) => `  ${d} → ${date}`)
         .join('\n');
-    
+
     const business = ctx?.business || {};
     const services = ctx?.services || [];
     const dentists = ctx?.dentists || [];
@@ -279,9 +268,7 @@ function buildSystemMessage(ctx) {
           ).join('\n')
         : '';
 
-    // Build business hours block for weekday awareness
     const businessHours = business.business_hours || {};
-    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     let hoursBlock = 'CLINIC OPEN DAYS:\n';
     for (const [day, config] of Object.entries(businessHours)) {
         if (config && typeof config === 'object' && config.isOpen) {
@@ -297,10 +284,6 @@ function buildSystemMessage(ctx) {
 
     const receptionistName = 'Eric';
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // FIX #2 continued: System prompt now includes day name + timezone info
-    // This prevents the AI from miscalculating which weekday a date falls on
-    // ═══════════════════════════════════════════════════════════════════════
     return `You are ${receptionistName}, a phone receptionist for ${businessName}. Keep every reply to 1–2 short sentences maximum. Be warm, natural, and efficient.
 
 Today is ${dayName}, ${today} (current time: ${currentTime}, Brussels timezone).
@@ -321,7 +304,7 @@ Introduce yourself warmly: "Hello! I'm the receptionist for ${businessName}. One
 - If NOT found → say: "I can't seem to find you in our system. Can I set you up? What is your first and last name?" Once they provide their name, call register_patient with their phone number, first name, and last name. **Do NOT ask for an email address.** After registration, let them know they'll receive a text message with a link to complete their profile. Then continue to the booking flow.
 
 ## Booking Flow — follow this order every time
-1. Ask the patient to describe their symptoms or what's bothering them. **Remember their exact words — you MUST pass this as the 'reason' field when calling book_appointment.**
+1. Ask the patient to describe their symptoms or what's bothering them. If their answer is vague (e.g. "toothache", "checkup", "something hurts"), ask one natural follow-up question to get more detail (e.g. "How long has that been bothering you?" or "Is it a specific tooth or more general?"). Once you have enough detail, summarise it as a short clinical note for the dentist — this is what you'll pass as the 'reason' field when booking.
 2. Based on their symptoms, pick the best matching service from the SERVICES list. Then say something like: "It sounds like you could use a [service name] — does that sound right to you?" Wait for confirmation before proceeding.
 3. DENTIST SELECTION: After the patient confirms the service, call get_dentists_for_service with the confirmed service_id. This returns ONLY dentists who can actually perform that service.
    - If only 1 dentist is returned → skip asking, just use that dentist. Say something like "Dr. [name] will take care of you."
@@ -336,7 +319,7 @@ Introduce yourself warmly: "Hello! I'm the receptionist for ${businessName}. One
    - Call check_appointment_availability with dentist_id, service_id, start_date, end_date
    - From the results, pick at most 3 slots on that specific weekday and present them naturally: "I have Thursday March 13th at 9am, Thursday March 20th at 10:30am, or Thursday March 20th at 2pm. Which one works for you?"
    - If no slots are found for that weekday, suggest trying a different day.
-6. Patient picks a slot → IMMEDIATELY call book_appointment. Do NOT say "shall I go ahead?", do NOT say "is that correct?", do NOT ask any follow-up question. Just say the filler ("I'll book that for you, one moment!") and call the tool right away. Always include the patient's symptoms from step 1 as the 'reason' field — never leave it blank or use a generic placeholder.
+6. Patient picks a slot → IMMEDIATELY call book_appointment. Do NOT say "shall I go ahead?", do NOT say "is that correct?", do NOT ask any follow-up question. Just say the filler ("I'll book that for you, one moment!") and call the tool right away. Always include a short clinical summary of the patient's symptoms as the 'reason' field — never leave it blank.
 
 ## After Booking
 Once book_appointment returns successfully, confirm the booking in one sentence (e.g. "You're all set — see you on [day] at [time]!") and end the conversation naturally. Do NOT ask "is there anything else?" or offer more help unless the patient asks.
@@ -445,7 +428,7 @@ const TOOLS = [
                 service_id: { type: 'string', description: 'UUID from the SERVICES list based on the visit reason' },
                 appointment_date: { type: 'string', description: 'YYYY-MM-DD' },
                 appointment_time: { type: 'string', description: 'HH:MM in 24-hour format — MUST come from check_appointment_availability results, in Brussels timezone' },
-                reason: { type: 'string', description: 'REQUIRED — patient symptoms or reason for visit in their own words, collected in step 1 of the booking flow. Never leave empty.' }
+                reason: { type: 'string', description: 'REQUIRED — a short clinical summary of the patient\'s symptoms or reason for visit, suitable for the dentist to read. Never leave empty.' }
             },
             required: ['patient_name', 'patient_phone', 'dentist_id', 'service_id', 'appointment_date', 'appointment_time', 'reason']
         }
@@ -493,7 +476,6 @@ const TOOLS = [
 async function executeToolCall(name, args, callerPhone, businessId) {
     console.log(`Tool call: ${name}`, JSON.stringify(args).substring(0, 200));
 
-    // ── resolve_weekday: handled locally, no edge function needed ──────────
     if (name === 'resolve_weekday') {
         const weekday = (args.weekday || '').toLowerCase().trim();
         const weeksAhead = parseInt(args.weeks_ahead || '0', 10);
@@ -504,7 +486,6 @@ async function executeToolCall(name, args, callerPhone, businessId) {
             return { error: `Unknown weekday: ${weekday}` };
         }
 
-        // Use Brussels timezone
         const now = new Date();
         const parts = new Intl.DateTimeFormat('en-US', {
             timeZone: BUSINESS_TIMEZONE,
@@ -520,7 +501,7 @@ async function executeToolCall(name, args, callerPhone, businessId) {
         }
 
         let delta = (targetDow - todayDow + 7) % 7;
-        if (delta === 0) delta = 7; // never today
+        if (delta === 0) delta = 7;
         delta += weeksAhead * 7;
 
         const d = new Date(Date.UTC(year, month - 1, day + delta));
@@ -553,11 +534,10 @@ async function executeToolCall(name, args, callerPhone, businessId) {
         const result = await callEdge({ action, ...enrichedArgs }, businessId);
         console.log(`Tool result [${name}]:`, JSON.stringify(result).substring(0, 300));
 
-        // After successful registration, automatically send profile completion link via SMS
         if (name === 'register_patient' && result && !result.error) {
             const phone = args.phone || callerPhone;
             if (phone) {
-                sendProfileCompletionLink(phone, businessId); // fire-and-forget
+                sendProfileCompletionLink(phone, businessId);
             }
         }
 
@@ -656,7 +636,7 @@ fastify.register(async (fastify) => {
         let businessContext = null;
 
         let sessionData = null;
-        let callerMuted = true; // Mute caller until initial lookup completes
+        let callerMuted = true;
         let sessionInitialized = false;
         let openAiReady = false;
         let twilioStarted = false;
@@ -672,7 +652,6 @@ fastify.register(async (fastify) => {
             }
         );
 
-        // Only initialize when BOTH OpenAI WS is open AND Twilio start event received
         const tryInitialize = () => {
             if (openAiReady && twilioStarted && !sessionInitialized) {
                 sessionInitialized = true;
@@ -743,7 +722,6 @@ fastify.register(async (fastify) => {
                 }));
                 openAiWs.send(JSON.stringify({ type: 'response.create' }));
                 console.log('Initial greeting sent (caller muted until lookup completes)');
-                // Safety: auto-unmute after 8s in case lookup never returns
                 setTimeout(() => {
                     if (callerMuted) {
                         callerMuted = false;
@@ -758,7 +736,6 @@ fastify.register(async (fastify) => {
         const handleFunctionCall = async (functionName, callId, args) => {
             const result = await executeToolCall(functionName, args, callerPhone, businessId);
 
-            // Unmute caller after initial lookup or registration completes
             if (functionName === 'lookup_patient' || functionName === 'register_patient') {
                 if (callerMuted) {
                     callerMuted = false;
@@ -816,7 +793,6 @@ fastify.register(async (fastify) => {
             }
         };
 
-        // ── OpenAI WebSocket events ─────────────────────────────────────────
         openAiWs.on('open', () => {
             console.log('Connected to OpenAI Realtime API');
             openAiReady = true;
@@ -945,7 +921,6 @@ fastify.register(async (fastify) => {
             }
         });
 
-        // ── Twilio WebSocket events ─────────────────────────────────────────
         connection.on('message', (message) => {
             try {
                 const data = JSON.parse(message);

@@ -805,14 +805,23 @@ fastify.register(async (fastify) => {
                     }
                 }
 
-                // Specific time filter — return single closest slot
+                // Specific time filter — prefer exact match first, then earliest date, then closest time
                 if (args.preferred_time && slots.length > 0) {
                     const [ph, pm] = args.preferred_time.split(':').map(Number);
                     const targetMins = ph * 60 + pm;
                     const sorted = [...slots].sort((a, b) => {
                         const [ah, am2] = a.time.split(':').map(Number);
                         const [bh, bm2] = b.time.split(':').map(Number);
-                        return Math.abs(ah * 60 + am2 - targetMins) - Math.abs(bh * 60 + bm2 - targetMins);
+                        const aDiff = Math.abs(ah * 60 + am2 - targetMins);
+                        const bDiff = Math.abs(bh * 60 + bm2 - targetMins);
+                        // Exact match always wins
+                        if (aDiff === 0 && bDiff !== 0) return -1;
+                        if (bDiff === 0 && aDiff !== 0) return 1;
+                        // Both exact → earliest date wins
+                        if (aDiff === 0 && bDiff === 0) return a.date < b.date ? -1 : 1;
+                        // Neither exact → closest time wins; tie → earliest date
+                        if (aDiff !== bDiff) return aDiff - bDiff;
+                        return a.date < b.date ? -1 : 1;
                     });
                     slots = [sorted[0]];
                     console.log(`preferred_time filter: requested ${args.preferred_time}, returning closest: ${sorted[0].date} ${sorted[0].time}`);

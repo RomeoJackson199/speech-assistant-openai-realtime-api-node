@@ -671,6 +671,7 @@ fastify.register(async (fastify) => {
         let openAiReady = false;
         let twilioStarted = false;
         const pendingToolCalls = new Map();
+        let toolInProgress = false;
 
         const openAiWs = new WebSocket(
             'wss://api.openai.com/v1/realtime?model=gpt-realtime-mini-2025-12-15',
@@ -789,12 +790,14 @@ fastify.register(async (fastify) => {
                     output: JSON.stringify(result),
                 },
             }));
+            toolInProgress = false;
             openAiWs.send(JSON.stringify({ type: 'response.create' }));
 
             return result;
         };
 
         const handleSpeechStarted = () => {
+            if (toolInProgress) return; // don't interrupt while a tool is executing
             if (markQueue.length > 0 && responseStartTimestampTwilio != null) {
                 const elapsed = latestMediaTimestamp - responseStartTimestampTwilio;
                 if (lastAssistantItem) {
@@ -850,6 +853,7 @@ fastify.register(async (fastify) => {
                         break;
 
                     case 'response.function_call_arguments.done': {
+                        toolInProgress = true;
                         const toolStartedAt = new Date();
                         pendingToolCalls.set(msg.call_id, {
                             startedAt: toolStartedAt,

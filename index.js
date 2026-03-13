@@ -8,13 +8,9 @@ dotenv.config();
 
 const { OPENAI_API_KEY, SUPABASE_URL, SUPABASE_ANON_KEY } = process.env;
 const FALLBACK_BUSINESS_ID = process.env.BUSINESS_ID;
-// Twilio REST API credentials — needed for programmatic hangup
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_AUTH_TOKEN   = process.env.TWILIO_AUTH_TOKEN;
 
 if (!OPENAI_API_KEY) { console.error('Missing OPENAI_API_KEY in .env'); process.exit(1); }
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) { console.error('Missing SUPABASE_URL or SUPABASE_ANON_KEY in .env'); process.exit(1); }
-if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) { console.warn('Warning: TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not set — hang_up tool and call timeout will not work'); }
 
 const fastify = Fastify();
 fastify.register(fastifyFormBody);
@@ -86,28 +82,7 @@ function createSessionData(businessId, callSid, callerPhone) {
         appointmentBooked: false, appointmentId: null };
 }
 
-// ─── Twilio REST: hang up a call programmatically ─────────────────────────────
-async function hangUpCall(callSid) {
-    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !callSid) {
-        console.warn('hangUpCall: missing credentials or callSid');
-        return;
-    }
-    try {
-        const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
-        const res = await fetch(
-            `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}.json`,
-            {
-                method: 'POST',
-                headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({ Status: 'completed' }),
-            }
-        );
-        if (res.ok) console.log(`Call ${callSid} terminated via Twilio REST API`);
-        else console.error(`hangUpCall failed: ${res.status} ${await res.text()}`);
-    } catch (err) {
-        console.error('hangUpCall error:', err.message);
-    }
-}
+
 
 // ─── Active sessions ──────────────────────────────────────────────────────────
 const activeSessions = new Map();
@@ -351,13 +326,12 @@ const TOOLS = [
 ];
 
 // ─── Execute tool call ────────────────────────────────────────────────────────
-async function executeToolCall(name, args, callerPhone, businessId, callSid, hangUpFn) {
+async function executeToolCall(name, args, callerPhone, businessId, hangUpFn) {
     console.log(`Tool call: ${name}`, JSON.stringify(args).substring(0, 200));
 
     // hang_up is handled entirely in index.js — no edge function call needed
     if (name === 'hang_up') {
-        console.log(`AI requested hang_up for call ${callSid}`);
-        // Small delay so the AI's spoken goodbye has time to play before the line drops
+        console.log(`AI requested hang_up`);
         setTimeout(() => hangUpFn(), 3500);
         return { success: true, message: 'Call will end shortly.' };
     }
@@ -531,7 +505,7 @@ fastify.register(async (fastify) => {
                     openAiWs.send(JSON.stringify({ type: 'response.create' }));
                 }
                 // Hard hang up after 5 more seconds to allow goodbye to play
-                setTimeout(() => hangUpCall(callSid), 5000);
+                setTimeout(() => hangUpThisCall(), 5000);
             }, CALL_TIMEOUT_MS);
         }
 
@@ -540,8 +514,12 @@ fastify.register(async (fastify) => {
             if (timeoutTimer) { clearTimeout(timeoutTimer); timeoutTimer = null; }
         }
 
-        // ── Hang up helper scoped to this call ──────────────────────────────
-        const hangUpThisCall = () => hangUpCall(callSid);
+        // ── Hang up: closing the media stream WebSocket is enough —
+        //    Twilio ends the call automatically when the stream closes.
+        const hangUpThisCall = () => {
+            console.log(`Hanging up call ${callSid} — closing media stream`);
+            try { connection.close(); } catch (err) { console.error('hangUpThisCall error:', err.message); }
+        };
 
         const openAiWs = new WebSocket(
             'wss://api.openai.com/v1/realtime?model=gpt-realtime-mini-2025-12-15',
@@ -603,11 +581,11 @@ fastify.register(async (fastify) => {
             openAiWs.send(JSON.stringify({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: instruction }] } }));
             openAiWs.send(JSON.stringify({ type: 'response.create' }));
             console.log('Initial greeting sent (caller muted until lookup completes)');
-            setTimeout(() => { if (callerMuted) { callerMuted = false; console.log('Safety unmute triggered after 8s timeout'); } }, 8000);
+            setTimeout(() => { if (callerMuted) { callerMuted = false; console.log('Safety unmute triggered after 20s timeout'); } }, 20000);
         };
 
         const handleFunctionCall = async (functionName, callId, args) => {
-            let result = await executeToolCall(functionName, args, callerPhone, businessId, callSid, hangUpThisCall);
+            let result = await executeToolCall(functionName, args, callerPhone, businessId, hangUpThisCall);
 
             // Filter availability slots by preferred weekday(s) and/or specific time
             if (functionName === 'check_appointment_availability' && result?.available_slots?.length) {

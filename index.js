@@ -348,8 +348,8 @@ Introduce yourself warmly: "Hello! I'm the receptionist for ${businessName}. One
    - Nothing specified:
      → Set time_preference = "any", leave preferred_time unset
 
-   STEP 5C — Call check_appointment_availability ONCE with dentist_id, service_id, start_date, end_date, time_preference, and preferred_time (if set).
-   When preferred_time is set, the system automatically returns only the single closest slot to that time — you do not need to filter yourself.
+   STEP 5C — Call check_appointment_availability ONCE with dentist_id, service_id, start_date, end_date, time_preference, preferred_time (if set), and weekdays.
+   Always set weekdays to the list of days the patient mentioned (e.g. ["thursday"] or ["thursday","friday"]). The system filters results to those days and finds the closest time — you do not need to filter yourself.
 
    STEP 5D — Filter and present results:
    Keep only slots that fall on the weekday(s) the patient mentioned. Then present based on how specific they were:
@@ -445,6 +445,11 @@ const TOOLS = [
                 preferred_time: {
                     type: 'string',
                     description: 'Specific time the patient requested, in HH:MM 24-hour format (e.g. "09:00" for 9am, "14:30" for 2:30pm). Only set this if the patient asked for a specific time — leave it out otherwise.'
+                },
+                weekdays: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'List of weekday names the patient wants, lowercase (e.g. ["thursday"] or ["thursday","friday"]). Always set this — it filters results to only the days the patient asked for.'
                 },
                 dentist_id: {
                     type: 'string',
@@ -574,7 +579,7 @@ async function executeToolCall(name, args, callerPhone, businessId) {
     if (!enrichedArgs.patient_phone && callerPhone) enrichedArgs.patient_phone = callerPhone;
 
     // Strip client-only fields that the edge function doesn't understand
-    const { preferred_time: _pt, ...edgeArgs } = enrichedArgs;
+    const { preferred_time: _pt, weekdays: _wd, ...edgeArgs } = enrichedArgs;
 
     try {
         const result = await callEdge({ action, ...edgeArgs }, businessId);
@@ -783,19 +788,37 @@ fastify.register(async (fastify) => {
         const handleFunctionCall = async (functionName, callId, args) => {
             let result = await executeToolCall(functionName, args, callerPhone, businessId);
 
-            // If patient asked for a specific time, filter slots to the closest match
-            if (functionName === 'check_appointment_availability' && args.preferred_time && result?.available_slots?.length) {
-                const [ph, pm] = args.preferred_time.split(':').map(Number);
-                const targetMins = ph * 60 + pm;
-                // Sort all slots by absolute distance from requested time
-                const sorted = [...result.available_slots].sort((a, b) => {
-                    const [ah, am2] = a.time.split(':').map(Number);
-                    const [bh, bm2] = b.time.split(':').map(Number);
-                    return Math.abs(ah * 60 + am2 - targetMins) - Math.abs(bh * 60 + bm2 - targetMins);
-                });
-                // Return only the single closest slot
-                result = { ...result, available_slots: [sorted[0]] };
-                console.log(`preferred_time filter: requested ${args.preferred_time}, returning closest: ${sorted[0].date} ${sorted[0].time}`);
+            // Filter slots by preferred weekday(s) and/or specific time
+            if (functionName === 'check_appointment_availability' && result?.available_slots?.length) {
+                const dayNames = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+                let slots = result.available_slots;
+
+                // Weekday filter — always apply if weekdays were specified in the args
+                if (args.weekdays && Array.isArray(args.weekdays) && args.weekdays.length > 0) {
+                    const targetDows = args.weekdays.map(d => dayNames.indexOf(d.toLowerCase())).filter(d => d >= 0);
+                    if (targetDows.length > 0) {
+                        slots = slots.filter(s => {
+                            const dow = new Date(s.date + 'T00:00:00Z').getUTCDay();
+                            return targetDows.includes(dow);
+                        });
+                        console.log(`weekday filter: kept ${slots.length} slots on ${args.weekdays.join('/')}`);
+                    }
+                }
+
+                // Specific time filter — return single closest slot
+                if (args.preferred_time && slots.length > 0) {
+                    const [ph, pm] = args.preferred_time.split(':').map(Number);
+                    const targetMins = ph * 60 + pm;
+                    const sorted = [...slots].sort((a, b) => {
+                        const [ah, am2] = a.time.split(':').map(Number);
+                        const [bh, bm2] = b.time.split(':').map(Number);
+                        return Math.abs(ah * 60 + am2 - targetMins) - Math.abs(bh * 60 + bm2 - targetMins);
+                    });
+                    slots = [sorted[0]];
+                    console.log(`preferred_time filter: requested ${args.preferred_time}, returning closest: ${sorted[0].date} ${sorted[0].time}`);
+                }
+
+                result = { ...result, available_slots: slots };
             }
 
             if (functionName === 'lookup_patient' || functionName === 'register_patient') {

@@ -321,13 +321,17 @@ Introduce yourself warmly: "Hello! I'm the receptionist for ${businessName}. One
    - For each mentioned weekday, look up the EXACT date from the NEXT OCCURRENCE table. Do NOT calculate it yourself.
    - If the patient said "next week" or "the week after", call resolve_weekday with the weekday name and weeks_ahead. Use the date it returns.
 
-   EXCLUSION — if the patient mentions they are unavailable for a period ("I am on vacation next week", "I am away until the 20th", "not this week", "back in two weeks"):
-   - Set start_date to the day AFTER they return, not the usual next occurrence.
-   - Examples:
-     - "I am on vacation next week, book me a Friday" → skip next week entirely, start_date = Monday of the week after, then find the first Friday on or after that.
-     - "I am away until March 28th" → start_date = March 29th.
-     - "Not this week, maybe next available Monday" → start_date = next Monday (skip current week).
-   - Do NOT ask the patient to confirm the skip — just apply it silently and present slots from after their absence.
+   EXCLUSION — if the patient mentions they are unavailable for any period, always silently skip that period and search from after it. Never ask the patient to confirm the skip — just apply it and present slots from after their absence.
+   Common phrasings and how to handle them:
+   - "I can't come this week" / "not this week" → start_date = next Monday (first day of next week)
+   - "I'm busy this week and next week" → start_date = Monday two weeks from now
+   - "I'm on vacation next week" → start_date = Monday of the week after next
+   - "I'm away until the 20th" / "away until March 28th" → start_date = that date + 1 day (e.g. March 29th)
+   - "Back in two weeks" / "not before two weeks" → start_date = today + 14 days
+   - "Not this week, maybe next available Monday" → start_date = next Monday (skip current week entirely)
+   - "I can't do mornings this week but I'm free next week" → use next week's dates, respect the time preference
+   - If the patient says both a day AND an exclusion ("I can't this week, maybe Friday?") → combine them: find the first Friday AFTER the exclusion period ends.
+   - If unclear how long they'll be away, assume 7 days and start from there.
 
    - Use the adjusted start_date (after any exclusion) as the search start.
    - Set end_date based on how far out the patient is thinking:
@@ -853,13 +857,29 @@ fastify.register(async (fastify) => {
                     output: JSON.stringify(result),
                 },
             }));
-            openAiWs.send(JSON.stringify({ type: 'response.create' }));
+            // Always force a spoken response after a tool — include explicit instructions
+            // so the model never stays silent after receiving a tool result.
+            openAiWs.send(JSON.stringify({
+                type: 'response.create',
+                response: {
+                    instructions: 'You MUST speak out loud now. Continue the conversation naturally based on the tool result you just received. Do not stay silent.'
+                }
+            }));
+
+            // Safety: if Eric never starts speaking (no response.audio.delta), release toolInProgress
+            // after 8 seconds so the caller can still interrupt.
+            setTimeout(() => {
+                if (toolInProgress) {
+                    toolInProgress = false;
+                    console.log('toolInProgress safety-timeout released');
+                }
+            }, 8000);
 
             return result;
         };
 
         const handleSpeechStarted = () => {
-            if (toolInProgress) return; // don't interrupt while a tool is executing
+            if (toolInProgress || callerMuted) return; // don't interrupt during tool or while caller is muted at start
             if (markQueue.length > 0 && responseStartTimestampTwilio != null) {
                 const elapsed = latestMediaTimestamp - responseStartTimestampTwilio;
                 if (lastAssistantItem) {

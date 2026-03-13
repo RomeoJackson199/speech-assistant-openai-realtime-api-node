@@ -339,20 +339,25 @@ Introduce yourself warmly: "Hello! I'm the receptionist for ${businessName}. One
      - Default (just a weekday, no other hint) → end_date = 60 days after start_date (covers ~8 occurrences of any weekday).
 
    STEP 5B — Detect time preference:
-   - "morning" or any specific time before 12:00 → time_preference = "morning"
-   - "afternoon" or any specific time at or after 12:00 → time_preference = "afternoon"
-   - Nothing specified → time_preference = "any"
+   - Patient said a SPECIFIC time (e.g. "at 9", "around 10am", "at half past 2"):
+     → Convert to HH:MM 24-hour (e.g. "9am" → "09:00", "2:30pm" → "14:30")
+     → Set preferred_time = that HH:MM value
+     → Set time_preference = "morning" if before 12:00, "afternoon" if 12:00 or later
+   - Patient said a time of day only ("morning", "afternoon"):
+     → Set time_preference = "morning" or "afternoon", leave preferred_time unset
+   - Nothing specified:
+     → Set time_preference = "any", leave preferred_time unset
 
-   STEP 5C — Call check_appointment_availability ONCE with dentist_id, service_id, start_date, end_date, time_preference.
-   The results cover all days in the range. You then filter in your head.
+   STEP 5C — Call check_appointment_availability ONCE with dentist_id, service_id, start_date, end_date, time_preference, and preferred_time (if set).
+   When preferred_time is set, the system automatically returns only the single closest slot to that time — you do not need to filter yourself.
 
    STEP 5D — Filter and present results:
    Keep only slots that fall on the weekday(s) the patient mentioned. Then present based on how specific they were:
-   - Specific time (e.g. "Thursday at 9", "Friday around 10am") → pick the single closest available slot to that time across all their preferred days: "I have Thursday the 20th at 9am — does that work?"
-   - Time-of-day only (e.g. "Thursday morning", "Friday afternoon") → present up to 2 matching slots across their preferred days.
-   - General day(s) (e.g. "Friday", "Thursday or Friday") → present up to 3 slots spread across all their preferred days, mixing days if needed (e.g. "I have Thursday the 17th at 10am, Friday the 18th at 9am, or Friday the 25th at 2pm").
-   - "Next available [day]" → search results for the very first open slot on that weekday anywhere in the results (could be weeks or months away). Present just that 1 slot: "The next available Friday I have is April 4th at 10am — does that work?"
-   - If no slots are found on any of their preferred days, say which days were checked and suggest a different day.
+   - Specific time set (preferred_time was passed) → the result already contains just 1 slot. Present it directly: "I have Thursday the 20th at 9am — does that work?"
+   - Time-of-day only (morning/afternoon, no preferred_time) → present up to 2 matching slots across their preferred days.
+   - General day(s) (e.g. "Friday", "Thursday or Friday") → present up to 3 slots spread across all their preferred days.
+   - "Next available [day]" → present just the first slot in the results.
+   - If no slots found, say which days were checked and suggest a different day.
 6. Patient picks a slot → IMMEDIATELY call book_appointment. Do NOT say "shall I go ahead?", do NOT say "is that correct?", do NOT ask any follow-up question. Just say the filler ("I'll book that for you, one moment!") and call the tool right away. Always include a short clinical summary of the patient's symptoms as the 'reason' field — never leave it blank.
 
 ## After Booking
@@ -436,6 +441,10 @@ const TOOLS = [
                     type: 'string',
                     enum: ['morning', 'afternoon', 'any'],
                     description: 'Preferred time of day'
+                },
+                preferred_time: {
+                    type: 'string',
+                    description: 'Specific time the patient requested, in HH:MM 24-hour format (e.g. "09:00" for 9am, "14:30" for 2:30pm). Only set this if the patient asked for a specific time — leave it out otherwise.'
                 },
                 dentist_id: {
                     type: 'string',
@@ -564,8 +573,11 @@ async function executeToolCall(name, args, callerPhone, businessId) {
     if (!enrichedArgs.phone && callerPhone) enrichedArgs.phone = callerPhone;
     if (!enrichedArgs.patient_phone && callerPhone) enrichedArgs.patient_phone = callerPhone;
 
+    // Strip client-only fields that the edge function doesn't understand
+    const { preferred_time: _pt, ...edgeArgs } = enrichedArgs;
+
     try {
-        const result = await callEdge({ action, ...enrichedArgs }, businessId);
+        const result = await callEdge({ action, ...edgeArgs }, businessId);
         console.log(`Tool result [${name}]:`, JSON.stringify(result).substring(0, 300));
 
         if (name === 'register_patient' && result && !result.error) {
@@ -769,7 +781,22 @@ fastify.register(async (fastify) => {
         };
 
         const handleFunctionCall = async (functionName, callId, args) => {
-            const result = await executeToolCall(functionName, args, callerPhone, businessId);
+            let result = await executeToolCall(functionName, args, callerPhone, businessId);
+
+            // If patient asked for a specific time, filter slots to the closest match
+            if (functionName === 'check_appointment_availability' && args.preferred_time && result?.available_slots?.length) {
+                const [ph, pm] = args.preferred_time.split(':').map(Number);
+                const targetMins = ph * 60 + pm;
+                // Sort all slots by absolute distance from requested time
+                const sorted = [...result.available_slots].sort((a, b) => {
+                    const [ah, am2] = a.time.split(':').map(Number);
+                    const [bh, bm2] = b.time.split(':').map(Number);
+                    return Math.abs(ah * 60 + am2 - targetMins) - Math.abs(bh * 60 + bm2 - targetMins);
+                });
+                // Return only the single closest slot
+                result = { ...result, available_slots: [sorted[0]] };
+                console.log(`preferred_time filter: requested ${args.preferred_time}, returning closest: ${sorted[0].date} ${sorted[0].time}`);
+            }
 
             if (functionName === 'lookup_patient' || functionName === 'register_patient') {
                 if (callerMuted) {

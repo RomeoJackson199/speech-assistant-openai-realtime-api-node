@@ -335,8 +335,8 @@ Introduce yourself warmly: "Hello! I'm the receptionist for ${businessName}. One
      - Vague far future ("in a few months", "not urgent") → end_date = 90 days after start_date.
      - "Next available [day]" with no timeframe → end_date = 365 days after start_date.
      - Patient gave an exclusion period (vacation, away) → end_date = 60 days after start_date.
-     - Specific date or week → end_date = 14 days after start_date.
-     - Default (just a weekday, no other hint) → end_date = 60 days after start_date (covers ~8 occurrences of any weekday).
+     - ALL other cases (specific time, specific day, morning/afternoon, or no hint) → end_date = 60 days after start_date.
+     CRITICAL: end_date must NEVER equal start_date. A single day search almost never has the exact slot the patient wants. Always use at least 60 days so multiple occurrences of the weekday are covered.
 
    STEP 5B — Detect time preference:
    - Patient said a SPECIFIC time (e.g. "at 9", "around 10am", "at half past 2"):
@@ -436,7 +436,7 @@ const TOOLS = [
             type: 'object',
             properties: {
                 start_date: { type: 'string', description: 'YYYY-MM-DD — must be tomorrow or later, never today. Use the next occurrence of the patient\'s preferred weekday.' },
-                end_date: { type: 'string', description: 'YYYY-MM-DD — dynamic window: 14 days for a specific week, 60 days default, 90 days if vague far-future, 365 days for next-available searches' },
+                end_date: { type: 'string', description: 'YYYY-MM-DD — MUST be at least 60 days after start_date in almost all cases. Never set end_date equal to or close to start_date — a single day rarely has the exact slot needed. Use 365 days for next-available searches, last day of month for a specific month, 60 days for everything else.' },
                 time_preference: {
                     type: 'string',
                     enum: ['morning', 'afternoon', 'any'],
@@ -821,7 +821,6 @@ fastify.register(async (fastify) => {
                     output: JSON.stringify(result),
                 },
             }));
-            toolInProgress = false;
             openAiWs.send(JSON.stringify({ type: 'response.create' }));
 
             return result;
@@ -870,6 +869,7 @@ fastify.register(async (fastify) => {
                 switch (msg.type) {
                     case 'response.audio.delta':
                         if (msg.delta) {
+                            toolInProgress = false; // Eric is speaking — safe to allow VAD again
                             connection.send(JSON.stringify({
                                 event: 'media',
                                 streamSid,
